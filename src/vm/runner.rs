@@ -23,6 +23,8 @@ pub struct VmConfig {
     pub command: Vec<String>,
     /// Quiet mode - suppress logging for cleaner command output
     pub quiet: bool,
+    /// Host home directory to share with the VM
+    pub host_home: Option<String>,
 }
 
 impl Default for VmConfig {
@@ -38,6 +40,7 @@ impl Default for VmConfig {
             },
             command: Vec::new(),
             quiet: false,
+            host_home: None,
         }
     }
 }
@@ -159,6 +162,13 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
     // Configure root disk remount - tells the kernel to use /dev/vda as root
     ctx.set_root_disk_remount("/dev/vda", Some("ext4"), Some("rw"))
         .map_err(|e| anyhow::anyhow!("Failed to set root disk remount: {}", e))?;
+
+    // Add virtiofs share for home directory if configured
+    if let Some(ref home_path) = config.host_home {
+        debug!("Sharing host home directory: {}", home_path);
+        ctx.add_virtiofs("home", home_path)
+            .map_err(|e| anyhow::anyhow!("Failed to add virtiofs share for home: {}", e))?;
+    }
 
     // Set kernel and initrd for direct boot
     // libkrun-efi can do direct kernel boot as well as EFI boot

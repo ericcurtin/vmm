@@ -18,17 +18,18 @@ use uuid::Uuid;
 use cli::{Cli, Commands};
 use docker::{extract_image, pull_image};
 use storage::{VmState, VmStatus, VmStore, VmmPaths};
-use vm::{create_disk_image, ensure_kernel, prepare_vm_rootfs, run_vm};
+use vm::{create_disk_image, ensure_kernel, prepare_vm_rootfs, run_vm, HostUserInfo};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Detect if we're in command mode (running a command, not interactive)
+    // Detect if we're running a VM (suppress logging unless --verbose)
+    let is_run_command = matches!(&cli.command, Commands::Run { .. });
     let command_mode = matches!(&cli.command, Commands::Run { command, .. } if !command.is_empty());
 
-    // Set up logging - suppress in command mode for cleaner output (unless verbose)
-    let quiet = command_mode && !cli.verbose;
+    // Set up logging - suppress for vmm run for cleaner output (unless verbose)
+    let quiet = is_run_command && !cli.verbose;
     if !quiet {
         let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
         let _subscriber = FmtSubscriber::builder()
@@ -79,7 +80,65 @@ async fn cmd_run(
     command: Vec<String>,
     quiet: bool,
 ) -> Result<()> {
-    // Generate VM ID and name
+    // Check if there's an existing stopped VM for this image that we can reuse
+    let mut store = VmStore::load(paths)?;
+    store.refresh_status();
+
+    if let Some(existing_vm) = store.find_by_image(image) {
+        // Reuse existing VM
+        let vm_id = existing_vm.id.clone();
+        let vm_name = existing_vm.name.clone();
+        let distro = existing_vm.distro.clone();
+
+        info!("Reusing existing VM '{}' for image '{}'", vm_name, image);
+
+        // Get paths
+        let disk_path = paths.vm_disk(&vm_id);
+        let kernel = ensure_kernel(paths, &distro).await?;
+
+        // Check disk exists
+        if !disk_path.exists() {
+            // Disk is gone, can't reuse - fall through to create new
+            info!("VM disk missing, creating new VM");
+        } else {
+            // Update state
+            {
+                let vm = store.get_mut(&vm_id).unwrap();
+                vm.status = VmStatus::Running;
+                vm.started_at = Some(Utc::now());
+                vm.pid = Some(std::process::id());
+            }
+            store.save(paths)?;
+
+            // Get host user info for home directory sharing
+            let host_user = HostUserInfo::current()?;
+
+            // Run the VM
+            let config = vm::runner::VmConfig {
+                vcpus: cpus,
+                ram_mib: memory,
+                disk_path: disk_path.to_string_lossy().to_string(),
+                kernel,
+                command: command.clone(),
+                quiet,
+                host_home: Some(host_user.home_dir.clone()),
+            };
+
+            run_vm(config)?;
+
+            // If we get here, VM exited
+            let mut store = VmStore::load(paths)?;
+            if let Some(vm) = store.get_mut(&vm_id) {
+                vm.status = VmStatus::Stopped;
+                vm.pid = None;
+            }
+            store.save(paths)?;
+
+            return Ok(());
+        }
+    }
+
+    // No existing VM found, create a new one
     let vm_id = Uuid::new_v4().to_string();
     let vm_name = name.unwrap_or_else(|| {
         // Generate a name from the image
@@ -150,7 +209,9 @@ async fn cmd_run(
     store.save(paths)?;
 
     info!("Starting VM '{}' with {} vCPUs and {} MiB RAM...", vm_name, cpus, memory);
-    println!("\n");
+
+    // Get host user info for home directory sharing
+    let host_user = HostUserInfo::current()?;
 
     // Run the VM (this doesn't return on success)
     let config = vm::runner::VmConfig {
@@ -160,6 +221,7 @@ async fn cmd_run(
         kernel,
         command: command.clone(),
         quiet,
+        host_home: Some(host_user.home_dir.clone()),
     };
 
     run_vm(config)?;
@@ -310,6 +372,9 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     info!("Starting VM '{}'...", vm_name);
     println!("\n");
 
+    // Get host user info for home directory sharing
+    let host_user = HostUserInfo::current()?;
+
     let config = vm::runner::VmConfig {
         vcpus,
         ram_mib,
@@ -317,6 +382,7 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
         kernel,
         command: Vec::new(), // No command for start - interactive mode
         quiet: false,
+        host_home: Some(host_user.home_dir.clone()),
     };
 
     run_vm(config)?;

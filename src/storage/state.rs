@@ -182,6 +182,37 @@ impl VmStore {
         vms
     }
 
+    /// Find a stopped VM by image name
+    pub fn find_by_image(&self, image: &str) -> Option<&VmState> {
+        // Normalize image name (add :latest if no tag)
+        let normalized = if image.contains(':') {
+            image.to_string()
+        } else {
+            format!("{}:latest", image)
+        };
+
+        // Also check without :latest suffix
+        let base_image = image.split(':').next().unwrap_or(image);
+
+        self.vms.values().find(|vm| {
+            // Only match stopped VMs
+            if vm.status != VmStatus::Stopped {
+                return false;
+            }
+
+            // Check if image matches
+            let vm_normalized = if vm.image.contains(':') {
+                vm.image.clone()
+            } else {
+                format!("{}:latest", vm.image)
+            };
+            let vm_base = vm.image.split(':').next().unwrap_or(&vm.image);
+
+            vm.image == image || vm.image == normalized || vm_normalized == normalized
+                || vm_base == base_image
+        })
+    }
+
     /// Update VM status based on running processes
     pub fn refresh_status(&mut self) {
         for vm in self.vms.values_mut() {
