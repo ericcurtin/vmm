@@ -274,11 +274,15 @@ fn setup_terminal() -> Result<TerminalGuard> {
     let original =
         Termios::from_fd(libc::STDIN_FILENO).context("Failed to get terminal settings")?;
 
-    // Set raw mode
+    // Set raw mode for input, but keep output processing for proper line endings
     let mut raw = original.clone();
+    // Disable canonical mode, echo, signals, and extended input processing
     raw.c_lflag &= !(ICANON | ECHO | ISIG | IEXTEN);
-    raw.c_iflag &= !(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
-    raw.c_oflag &= !(OPOST);
+    // Disable input processing except keep some basics
+    raw.c_iflag &= !(IXON | BRKINT | INPCK | ISTRIP);
+    // Keep ICRNL to translate CR to NL on input
+    // Keep OPOST and ONLCR for proper newline handling on output
+    raw.c_oflag |= OPOST | ONLCR;
     raw.c_cflag |= CS8;
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;

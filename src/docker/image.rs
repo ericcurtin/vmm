@@ -30,7 +30,7 @@ pub async fn pull_image(image: &str) -> Result<ImageInfo> {
     };
 
     let full_image = format!("{}:{}", repo, tag);
-    info!("Pulling image: {}", full_image);
+    debug!("Pulling image: {}", full_image);
 
     // Create image (pull)
     let options = CreateImageOptions {
@@ -78,7 +78,7 @@ pub async fn extract_image(image: &str, dest: &Path) -> Result<()> {
     let docker = Docker::connect_with_local_defaults()
         .context("Failed to connect to Docker daemon")?;
 
-    info!("Extracting image {} to {:?}", image, dest);
+    debug!("Extracting image {} to {:?}", image, dest);
 
     // Create a temporary container
     let container_config = bollard::container::Config {
