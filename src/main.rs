@@ -94,7 +94,7 @@ async fn cmd_run(
 
         // Get paths
         let disk_path = paths.vm_disk(&vm_id);
-        let kernel = ensure_kernel(paths, &distro).await?;
+        let kernel = ensure_kernel(paths, &distro, Some(image)).await?;
 
         // Check disk exists
         if !disk_path.exists() {

@@ -83,9 +83,20 @@ fn get_kernel_source(distro: &str, _arch: &str) -> Option<KernelSource> {
 }
 
 /// Ensure kernel and initrd are available for the given distro
-pub async fn ensure_kernel(paths: &VmmPaths, distro: &str) -> Result<KernelInfo> {
+///
+/// # Arguments
+/// * `paths` - VMM paths configuration
+/// * `distro` - The detected distro name (e.g., "ubuntu", "fedora")
+/// * `image` - Optional full image name with tag (e.g., "ubuntu:24.04", "fedora:41")
+///             If not provided, uses "latest" tag
+pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>) -> Result<KernelInfo> {
     let arch = std::env::consts::ARCH;
-    let kernel_dir = paths.kernels_dir().join(format!("{}-{}", distro, arch));
+
+    // Extract version from image tag for kernel caching
+    let version = image
+        .and_then(|img| img.split(':').nth(1))
+        .unwrap_or("latest");
+    let kernel_dir = paths.kernels_dir().join(format!("{}-{}-{}", distro, version, arch));
 
     std::fs::create_dir_all(&kernel_dir)
         .context("Failed to create kernel directory")?;
@@ -124,8 +135,15 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str) -> Result<KernelInfo>
     // No cached kernel found, need to download
     info!("Extracting kernel for {} (this may take a moment)...", distro);
 
+    // Build the image reference to use for kernel extraction
+    let image_ref = image.unwrap_or_else(|| match distro {
+        "ubuntu" => "ubuntu:latest",
+        "fedora" => "fedora:latest",
+        _ => "unknown:latest",
+    });
+
     // Try to get preferred page size kernel first
-    if extract_kernel_from_image(distro, &kernel_dir, preferred).await.is_ok() {
+    if extract_kernel_from_image(distro, image_ref, &kernel_dir, preferred).await.is_ok() {
         if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, preferred).await? {
             let page_desc = if preferred == PageSize::Page16k { "16k" } else { "4k" };
             info!("Using {} page kernel for {}", page_desc, distro);
@@ -136,7 +154,7 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str) -> Result<KernelInfo>
     // Fall back to other page size if preferred failed
     if preferred != fallback {
         info!("16k kernel not available, trying 4k kernel...");
-        if extract_kernel_from_image(distro, &kernel_dir, fallback).await.is_ok() {
+        if extract_kernel_from_image(distro, image_ref, &kernel_dir, fallback).await.is_ok() {
             if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, fallback).await? {
                 return Ok(kernel_info);
             }
@@ -184,19 +202,12 @@ fn get_cmdline(distro: &str) -> String {
 }
 
 /// Extract kernel and initrd from a Docker image
-async fn extract_kernel_from_image(distro: &str, dest: &Path, page_size: PageSize) -> Result<()> {
+async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_size: PageSize) -> Result<()> {
     use tokio::process::Command;
 
     let suffix = page_size.suffix();
     let kernel_filename = format!("vmlinuz{}", suffix);
     let initrd_filename = format!("initrd{}.img", suffix);
-
-    // Use a kernel-containing image
-    let image = match distro {
-        "ubuntu" => "ubuntu:24.04",
-        "fedora" => "fedora:41",
-        _ => return Err(anyhow::anyhow!("Unsupported distro: {}", distro)),
-    };
 
     info!("Pulling kernel image {}...", image);
 
@@ -275,147 +286,51 @@ async fn extract_kernel_from_image(distro: &str, dest: &Path, page_size: PageSiz
         .await;
 
     // If kernel extraction failed, we need an alternative approach
-    // For base container images that don't have a kernel, we need to use a separate kernel image
+    // Build a kernel by installing kernel packages in the user's container image
     if !dest.join(&kernel_filename).exists() {
-        info!("Base image doesn't contain kernel, using cloud kernel...");
-        download_cloud_kernel(distro, dest, page_size).await?;
+        info!("Base image doesn't contain kernel, building kernel from image...");
+        build_kernel_from_image(distro, image, dest, page_size).await?;
     }
 
     Ok(())
 }
 
-/// Download a cloud kernel for the given distro
-async fn download_cloud_kernel(distro: &str, dest: &Path, page_size: PageSize) -> Result<()> {
+/// Build a kernel by installing kernel packages in the user's container image
+///
+/// This builds a kernel from the same container image the user specified,
+/// ensuring version compatibility.
+async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_size: PageSize) -> Result<()> {
     use tokio::process::Command;
 
     let suffix = page_size.suffix();
     let kernel_filename = format!("vmlinuz{}", suffix);
     let initrd_filename = format!("initrd{}.img", suffix);
 
-    // For macOS ARM64, we need ARM64 kernels
-    // We'll use a special kernel image that contains pre-built kernels
-    // The image tag includes the page size (e.g., 24.04-16k for 16k page size)
-    let page_size_tag = match page_size {
-        PageSize::Page16k => "-16k",
-        PageSize::Page4k => "",  // Default/4k doesn't have a suffix in tags
-    };
-
-    let kernel_image = match distro {
-        "ubuntu" => format!("ghcr.io/slp/libkrun-ubuntu-kernel:24.04{}", page_size_tag),
-        "fedora" => format!("ghcr.io/slp/libkrun-fedora-kernel:41{}", page_size_tag),
-        _ => return Err(anyhow::anyhow!("Unsupported distro for cloud kernel: {}", distro)),
-    };
-
-    let page_desc = if page_size == PageSize::Page16k { "16k page" } else { "4k page" };
-    info!("Attempting to pull {} kernel image {}...", page_desc, kernel_image);
-
-    // Try to pull the kernel image
-    let pull_result = Command::new("docker")
-        .args(["pull", &kernel_image])
-        .status()
-        .await;
-
-    if pull_result.is_err() || !pull_result.unwrap().success() {
-        // Fall back to building a minimal kernel from a Fedora image
-        // Only fall back for 4k kernels (we can build those)
-        if page_size == PageSize::Page4k {
-            info!("Could not find pre-built kernel, attempting to extract from distro image...");
-            return extract_kernel_from_distro_image(distro, dest, page_size).await;
-        } else {
-            return Err(anyhow::anyhow!("16k kernel image not available for {}", distro));
-        }
-    }
-
-    // Create container and copy kernel
-    let container_id = Command::new("docker")
-        .args(["create", &kernel_image])
-        .output()
-        .await?;
-
-    let container_id = String::from_utf8_lossy(&container_id.stdout)
-        .trim()
-        .to_string();
-
-    // Copy kernel and initrd - try page-size-specific filenames first, then generic
-    let kernel_copied = try_copy_kernel_files(&container_id, dest, &kernel_filename, &initrd_filename).await;
-
-    if !kernel_copied {
-        // Try generic names and rename
-        let _ = Command::new("docker")
-            .args(["cp", &format!("{}:/vmlinuz", container_id), dest.join(&kernel_filename).to_str().unwrap()])
-            .status()
-            .await;
-
-        let _ = Command::new("docker")
-            .args(["cp", &format!("{}:/initrd.img", container_id), dest.join(&initrd_filename).to_str().unwrap()])
-            .status()
-            .await;
-    }
-
-    // Clean up
-    let _ = Command::new("docker")
-        .args(["rm", "-f", &container_id])
-        .status()
-        .await;
-
-    // Verify kernel was copied
-    if !dest.join(&kernel_filename).exists() {
-        return Err(anyhow::anyhow!("Failed to copy kernel from image"));
-    }
-
-    Ok(())
-}
-
-/// Try to copy kernel files with specific names from container
-async fn try_copy_kernel_files(
-    container_id: &str,
-    dest: &Path,
-    kernel_filename: &str,
-    initrd_filename: &str,
-) -> bool {
-    use tokio::process::Command;
-
-    // Try to copy with the specific page-size filename
-    let kernel_result = Command::new("docker")
-        .args(["cp", &format!("{}:/{}", container_id, kernel_filename), dest.join(kernel_filename).to_str().unwrap()])
-        .status()
-        .await;
-
-    let initrd_result = Command::new("docker")
-        .args(["cp", &format!("{}:/{}", container_id, initrd_filename), dest.join(initrd_filename).to_str().unwrap()])
-        .status()
-        .await;
-
-    kernel_result.is_ok() && kernel_result.unwrap().success() &&
-        initrd_result.is_ok() && initrd_result.unwrap().success()
-}
-
-/// Extract kernel from a full distro image (e.g., Fedora with kernel package)
-async fn extract_kernel_from_distro_image(distro: &str, dest: &Path, page_size: PageSize) -> Result<()> {
-    use tokio::process::Command;
-
-    let suffix = page_size.suffix();
-    let kernel_filename = format!("vmlinuz{}", suffix);
-    let initrd_filename = format!("initrd{}.img", suffix);
-
-    info!("Building kernel extraction container for {}...", distro);
+    info!("Building kernel from image {}...", image);
 
     // Create a Dockerfile that installs the kernel and copies it to a known location
+    // Uses the user's specified image as the base
     let dockerfile = match distro {
-        "ubuntu" => r#"
-FROM ubuntu:24.04
+        "ubuntu" | "debian" => format!(r#"
+FROM {}
 RUN apt-get update && apt-get install -y linux-image-generic && \
     cp /boot/vmlinuz-* /vmlinuz && \
     cp /boot/initrd.img-* /initrd.img
-"#,
-        "fedora" => r#"
-FROM fedora:41
+"#, image),
+        "fedora" => format!(r#"
+FROM {}
 RUN dnf install -y kernel-core dracut && \
     cp /lib/modules/*/vmlinuz /vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "bash shutdown" --force /initrd.img $KVER
-"#,
-        _ => return Err(anyhow::anyhow!("Unsupported distro: {}", distro)),
+"#, image),
+        "alpine" => format!(r#"
+FROM {}
+RUN apk add --no-cache linux-lts && \
+    cp /boot/vmlinuz-* /vmlinuz && \
+    cp /boot/initramfs-* /initrd.img || true
+"#, image),
+        _ => return Err(anyhow::anyhow!("Unsupported distro for kernel extraction: {}", distro)),
     };
 
     // Create temp dir for build context

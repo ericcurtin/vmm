@@ -419,7 +419,12 @@ fn setup_minimal_init_user(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
     debug!("Setting up minimal init for user {}", user.username);
 
     // Create /sbin if it doesn't exist
-    std::fs::create_dir_all(rootfs.join("sbin"))?;
+    let sbin = rootfs.join("sbin");
+    if !sbin.exists() {
+        std::fs::create_dir_all(&sbin)?;
+    }
+    // Ensure /sbin is writable (some container images have it read-only)
+    let _ = std::fs::set_permissions(&sbin, std::fs::Permissions::from_mode(0o755));
 
     // Create a minimal init script that mounts home and runs as user
     let init_script = rootfs.join("sbin/init");
@@ -750,7 +755,12 @@ fn setup_minimal_init(rootfs: &Path) -> Result<()> {
     debug!("Setting up minimal init for container image");
 
     // Create /sbin if it doesn't exist
-    std::fs::create_dir_all(rootfs.join("sbin"))?;
+    let sbin = rootfs.join("sbin");
+    if !sbin.exists() {
+        std::fs::create_dir_all(&sbin)?;
+    }
+    // Ensure /sbin is writable (some container images have it read-only)
+    let _ = std::fs::set_permissions(&sbin, std::fs::Permissions::from_mode(0o755));
 
     // Create a minimal init script
     let init_script = rootfs.join("sbin/init");
