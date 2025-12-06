@@ -94,7 +94,7 @@ async fn cmd_run(
 
         // Get paths
         let disk_path = paths.vm_disk(&vm_id);
-        let kernel = ensure_kernel(paths, &distro, Some(image)).await?;
+        let kernel = ensure_kernel(paths, &distro, Some(image), !quiet).await?;
 
         // Check disk exists
         if !disk_path.exists() {
@@ -176,7 +176,7 @@ async fn cmd_run(
 
     // Ensure kernel is available
     info!("Ensuring kernel is available...");
-    let kernel = ensure_kernel(paths, &distro, Some(image)).await
+    let kernel = ensure_kernel(paths, &distro, Some(image), !quiet).await
         .context("Failed to ensure kernel")?;
 
     // Create disk image from rootfs
@@ -354,7 +354,7 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 
     // Get paths
     let disk_path = paths.vm_disk(&vm_id);
-    let kernel = ensure_kernel(paths, &distro, Some(&vm_image)).await?;
+    let kernel = ensure_kernel(paths, &distro, Some(&vm_image), false).await?;
 
     // Check disk exists
     if !disk_path.exists() {

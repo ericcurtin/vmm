@@ -144,7 +144,7 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
     });
 
     // Try to get preferred page size kernel first
-    if extract_kernel_from_image(distro, image_ref, &kernel_dir, preferred).await.is_ok() {
+    if extract_kernel_from_image(distro, image_ref, &kernel_dir, preferred, verbose).await.is_ok() {
         if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, preferred).await? {
             let page_desc = if preferred == PageSize::Page16k { "16k" } else { "4k" };
             debug!("Using {} page kernel for {}", page_desc, distro);
@@ -155,7 +155,7 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
     // Fall back to other page size if preferred failed
     if preferred != fallback {
         debug!("16k kernel not available, trying 4k kernel...");
-        if extract_kernel_from_image(distro, image_ref, &kernel_dir, fallback).await.is_ok() {
+        if extract_kernel_from_image(distro, image_ref, &kernel_dir, fallback, verbose).await.is_ok() {
             if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, fallback).await? {
                 return Ok(kernel_info);
             }
@@ -203,7 +203,7 @@ fn get_cmdline(distro: &str) -> String {
 }
 
 /// Extract kernel and initrd from a Docker image
-async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_size: PageSize) -> Result<()> {
+async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_size: PageSize, verbose: bool) -> Result<()> {
     use tokio::process::Command;
     use std::process::Stdio;
 
@@ -213,13 +213,16 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
 
     debug!("Pulling kernel image {}...", image);
 
-    // Pull the image first (suppress output)
-    let pull_status = Command::new("docker")
-        .args(["pull", "-q", image])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
+    // Pull the image first
+    let mut pull_cmd = Command::new("docker");
+    if verbose {
+        pull_cmd.args(["pull", image]);
+    } else {
+        pull_cmd.args(["pull", "-q", image])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
+    let pull_status = pull_cmd.status().await
         .context("Failed to pull Docker image")?;
 
     if !pull_status.success() {
@@ -227,11 +230,12 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
     }
 
     // Create a temporary container and copy kernel files
-    let container_id = Command::new("docker")
-        .args(["create", image])
-        .stderr(Stdio::null())
-        .output()
-        .await
+    let mut create_cmd = Command::new("docker");
+    create_cmd.args(["create", image]);
+    if !verbose {
+        create_cmd.stderr(Stdio::null());
+    }
+    let container_id = create_cmd.output().await
         .context("Failed to create container")?;
 
     if !container_id.status.success() {
@@ -300,7 +304,7 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
     // Build a kernel by installing kernel packages in the user's container image
     if !dest.join(&kernel_filename).exists() {
         debug!("Base image doesn't contain kernel, building kernel from image...");
-        build_kernel_from_image(distro, image, dest, page_size).await?;
+        build_kernel_from_image(distro, image, dest, page_size, verbose).await?;
     }
 
     Ok(())
@@ -310,7 +314,7 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
 ///
 /// This builds a kernel from the same container image the user specified,
 /// ensuring version compatibility.
-async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_size: PageSize) -> Result<()> {
+async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_size: PageSize, verbose: bool) -> Result<()> {
     use tokio::process::Command;
     use std::process::Stdio;
 
@@ -350,47 +354,51 @@ RUN apk add --no-cache linux-lts && \
     let dockerfile_path = temp_dir.path().join("Dockerfile");
     std::fs::write(&dockerfile_path, dockerfile)?;
 
-    // Build the image (suppress output with -q)
+    // Build the image
     let image_name = format!("vmm-kernel-{}", distro);
-    let build_status = Command::new("docker")
-        .args(["build", "-q", "-t", &image_name, temp_dir.path().to_str().unwrap()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
+    let mut build_cmd = Command::new("docker");
+    if verbose {
+        build_cmd.args(["build", "-t", &image_name, temp_dir.path().to_str().unwrap()]);
+    } else {
+        build_cmd.args(["build", "-q", "-t", &image_name, temp_dir.path().to_str().unwrap()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
+    let build_status = build_cmd.status().await
         .context("Failed to build kernel image")?;
 
     if !build_status.success() {
         return Err(anyhow::anyhow!("Failed to build kernel image"));
     }
 
-    // Create container and extract (suppress output)
-    let container_id = Command::new("docker")
-        .args(["create", &image_name])
-        .stderr(Stdio::null())
-        .output()
-        .await?;
+    // Create container and extract
+    let mut create_cmd = Command::new("docker");
+    create_cmd.args(["create", &image_name]);
+    if !verbose {
+        create_cmd.stderr(Stdio::null());
+    }
+    let container_id = create_cmd.output().await?;
 
     let container_id = String::from_utf8_lossy(&container_id.stdout)
         .trim()
         .to_string();
 
-    // Copy kernel and initrd (suppress output)
-    Command::new("docker")
-        .args(["cp", &format!("{}:/vmlinuz", container_id), dest.join(&kernel_filename).to_str().unwrap()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await?;
+    // Copy kernel and initrd
+    let mut cp_kernel_cmd = Command::new("docker");
+    cp_kernel_cmd.args(["cp", &format!("{}:/vmlinuz", container_id), dest.join(&kernel_filename).to_str().unwrap()]);
+    if !verbose {
+        cp_kernel_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    cp_kernel_cmd.status().await?;
 
-    Command::new("docker")
-        .args(["cp", &format!("{}:/initrd.img", container_id), dest.join(&initrd_filename).to_str().unwrap()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await?;
+    let mut cp_initrd_cmd = Command::new("docker");
+    cp_initrd_cmd.args(["cp", &format!("{}:/initrd.img", container_id), dest.join(&initrd_filename).to_str().unwrap()]);
+    if !verbose {
+        cp_initrd_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    cp_initrd_cmd.status().await?;
 
-    // Clean up (suppress output)
+    // Clean up (always suppress output)
     let _ = Command::new("docker")
         .args(["rm", "-f", &container_id])
         .stdout(Stdio::null())
