@@ -1,0 +1,55 @@
+[package]
+name = "vmm"
+version = "0.1.0"
+edition = "2021"
+description = "A Docker-like experience for VMs using libkrun"
+license = "MIT"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Docker client
+bollard = "0.18"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Filesystem operations
+tar = "0.4"
+flate2 = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# UUID generation for VM IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Directories
+dirs = "5"
+
+# Terminal handling
+termios = "0.3"
+libc = "0.2"
+
+# HTTP client for kernel downloads
+reqwest = { version = "0.12", features = ["stream"] }
+futures-util = "0.3"
+
+# Temp files
+tempfile = "3"
+
+[build-dependencies]
+cc = "1"
