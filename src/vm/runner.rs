@@ -5,10 +5,12 @@
 //! that have a kernel and bootloader installed.
 
 use anyhow::{Context, Result};
+use std::io::{BufRead, BufReader};
+use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use tracing::{debug, info};
 
-use super::krun_ffi::{KrunContext, KRUN_DISK_FORMAT_RAW, KRUN_LOG_LEVEL_DEBUG, KRUN_LOG_LEVEL_WARN};
+use super::krun_ffi::{KrunContext, KRUN_DISK_FORMAT_RAW, KRUN_LOG_LEVEL_WARN};
 use super::kernel::KernelInfo;
 
 /// Configuration for running a VM
@@ -17,6 +19,10 @@ pub struct VmConfig {
     pub ram_mib: u32,
     pub disk_path: String,
     pub kernel: KernelInfo,
+    /// Command to run (empty for interactive shell)
+    pub command: Vec<String>,
+    /// Quiet mode - suppress logging for cleaner command output
+    pub quiet: bool,
 }
 
 impl Default for VmConfig {
@@ -30,6 +36,8 @@ impl Default for VmConfig {
                 initrd_path: std::path::PathBuf::new(),
                 cmdline: String::new(),
             },
+            command: Vec::new(),
+            quiet: false,
         }
     }
 }
@@ -39,6 +47,83 @@ impl Default for VmConfig {
 /// This function does not return on success - it enters the VM.
 /// On error, it returns the error.
 pub fn run_vm(config: VmConfig) -> Result<()> {
+    // In quiet mode, fork and filter output
+    if config.quiet {
+        return run_vm_quiet(config);
+    }
+
+    run_vm_inner(config)
+}
+
+/// Run VM with output filtering for quiet mode
+fn run_vm_quiet(config: VmConfig) -> Result<()> {
+    // Create a pipe for stderr
+    let mut stderr_pipe = [0i32; 2];
+    if unsafe { libc::pipe(stderr_pipe.as_mut_ptr()) } != 0 {
+        return Err(anyhow::anyhow!("Failed to create pipe"));
+    }
+    let (stderr_read, stderr_write) = (stderr_pipe[0], stderr_pipe[1]);
+
+    match unsafe { libc::fork() } {
+        -1 => Err(anyhow::anyhow!("Failed to fork")),
+        0 => {
+            // Child process - runs the VM
+            unsafe {
+                libc::close(stderr_read);
+                // Redirect stderr to the pipe
+                libc::dup2(stderr_write, libc::STDERR_FILENO);
+                libc::close(stderr_write);
+            }
+
+            // Run VM (doesn't return on success)
+            run_vm_inner(config)?;
+            std::process::exit(0);
+        }
+        child_pid => {
+            // Parent process - filters output
+            unsafe { libc::close(stderr_write); }
+
+            // Read from pipe and filter
+            let stderr_file = unsafe { std::fs::File::from_raw_fd(stderr_read) };
+            let reader = BufReader::new(stderr_file);
+
+            for line in reader.lines() {
+                let Ok(line) = line else { continue };
+
+                // Filter and transform libkrun log lines
+                // Format: [timestamp ERROR init_or_kernel] message
+                if line.contains("ERROR init_or_kernel]") {
+                    // Extract the message after the ]
+                    if let Some(pos) = line.find("] ") {
+                        let message = &line[pos + 2..];
+                        // Skip kernel messages (start with [ followed by timestamp)
+                        if message.starts_with('[') && message.contains(']') {
+                            // This is a kernel message like "[    0.198231] sysrq: Power Off"
+                            continue;
+                        }
+                        // Print the actual command output
+                        println!("{}", message);
+                    }
+                }
+            }
+
+            // Wait for child and get exit status
+            let mut status: i32 = 0;
+            unsafe { libc::waitpid(child_pid, &mut status, 0) };
+
+            if libc::WIFEXITED(status) {
+                let exit_code = libc::WEXITSTATUS(status);
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+fn run_vm_inner(config: VmConfig) -> Result<()> {
     info!(
         "Starting VM with {} vCPUs and {} MiB RAM",
         config.vcpus, config.ram_mib
@@ -54,8 +139,8 @@ pub fn run_vm(config: VmConfig) -> Result<()> {
     // Set up terminal for raw mode
     let _terminal_guard = setup_terminal()?;
 
-    // Set log level - use DEBUG for troubleshooting
-    KrunContext::set_log_level(KRUN_LOG_LEVEL_DEBUG)
+    // Set log level - use WARN normally, but in quiet mode we're already filtered
+    KrunContext::set_log_level(KRUN_LOG_LEVEL_WARN)
         .map_err(|e| anyhow::anyhow!("Failed to set log level: {}", e))?;
 
     // Create context

@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
 use tracing::{debug, info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{FmtSubscriber, layer::SubscriberExt, util::SubscriberInitExt, fmt, EnvFilter};
 use uuid::Uuid;
 
 use cli::{Cli, Commands};
@@ -24,21 +24,27 @@ use vm::{create_disk_image, ensure_kernel, prepare_vm_rootfs, run_vm};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Set up logging
-    let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
-    let _subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .with_target(false)
-        .without_time()
-        .init();
+    // Detect if we're in command mode (running a command, not interactive)
+    let command_mode = matches!(&cli.command, Commands::Run { command, .. } if !command.is_empty());
+
+    // Set up logging - suppress in command mode for cleaner output (unless verbose)
+    let quiet = command_mode && !cli.verbose;
+    if !quiet {
+        let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
+        let _subscriber = FmtSubscriber::builder()
+            .with_max_level(level)
+            .with_target(false)
+            .without_time()
+            .init();
+    }
 
     // Initialize paths
     let paths = VmmPaths::new()?;
     paths.ensure_dirs()?;
 
     match cli.command {
-        Commands::Run { image, cpus, memory, name } => {
-            cmd_run(&paths, &image, cpus, memory, name).await
+        Commands::Run { image, cpus, memory, name, command } => {
+            cmd_run(&paths, &image, cpus, memory, name, command, quiet).await
         }
         Commands::Images | Commands::Ls => {
             cmd_list(&paths).await
@@ -70,6 +76,8 @@ async fn cmd_run(
     cpus: u8,
     memory: u32,
     name: Option<String>,
+    command: Vec<String>,
+    quiet: bool,
 ) -> Result<()> {
     // Generate VM ID and name
     let vm_id = Uuid::new_v4().to_string();
@@ -104,7 +112,7 @@ async fn cmd_run(
 
     // Prepare rootfs (auto-login, init, etc.)
     info!("Preparing VM rootfs...");
-    prepare_vm_rootfs(&rootfs, &distro).await
+    prepare_vm_rootfs(&rootfs, &distro, &command).await
         .context("Failed to prepare rootfs")?;
 
     // Ensure kernel is available
@@ -150,6 +158,8 @@ async fn cmd_run(
         ram_mib: memory,
         disk_path: disk_path.to_string_lossy().to_string(),
         kernel,
+        command: command.clone(),
+        quiet,
     };
 
     run_vm(config)?;
@@ -305,6 +315,8 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
         ram_mib,
         disk_path: disk_path.to_string_lossy().to_string(),
         kernel,
+        command: Vec::new(), // No command for start - interactive mode
+        quiet: false,
     };
 
     run_vm(config)?;

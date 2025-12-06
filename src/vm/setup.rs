@@ -45,7 +45,7 @@ pub fn detect_distro(rootfs: &Path) -> Result<String> {
 }
 
 /// Prepare the VM rootfs with auto-login and necessary configurations
-pub async fn prepare_vm_rootfs(rootfs: &Path, distro: &str) -> Result<()> {
+pub async fn prepare_vm_rootfs(rootfs: &Path, distro: &str, command: &[String]) -> Result<()> {
     info!("Preparing VM rootfs for {} at {:?}", distro, rootfs);
 
     // Create essential directories if missing
@@ -61,7 +61,7 @@ pub async fn prepare_vm_rootfs(rootfs: &Path, distro: &str) -> Result<()> {
     setup_networking(rootfs, distro)?;
 
     // Set up console
-    setup_console(rootfs, distro)?;
+    setup_console(rootfs, distro, command)?;
 
     // Set proper permissions
     fix_permissions(rootfs)?;
@@ -250,6 +250,10 @@ fn setup_init(rootfs: &Path, distro: &str) -> Result<()> {
     let has_systemd = rootfs.join("lib/systemd/systemd").exists()
         || rootfs.join("usr/lib/systemd/systemd").exists();
 
+    // Check if any init exists
+    let has_init = rootfs.join("sbin/init").exists()
+        || rootfs.join("init").exists();
+
     if has_systemd {
         // Ensure systemd is the init
         let init_link = rootfs.join("sbin/init");
@@ -285,10 +289,58 @@ fn setup_init(rootfs: &Path, distro: &str) -> Result<()> {
                 &default_target,
             );
         }
-    } else {
-        // Create simple init if none exists
-        setup_generic_autologin(rootfs)?;
+    } else if !has_init {
+        // No init at all - create a minimal one that runs bash
+        // This is common for minimal container images
+        setup_minimal_init(rootfs)?;
     }
+
+    Ok(())
+}
+
+fn setup_minimal_init(rootfs: &Path) -> Result<()> {
+    debug!("Setting up minimal init for container image");
+
+    // Create /sbin if it doesn't exist
+    std::fs::create_dir_all(rootfs.join("sbin"))?;
+
+    // Create a minimal init script
+    let init_script = rootfs.join("sbin/init");
+    let content = r#"#!/bin/sh
+# Minimal init for vmm
+set -e
+
+# Mount essential filesystems
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sys /sys 2>/dev/null || true
+mount -t devtmpfs dev /dev 2>/dev/null || true
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+
+# Set up environment
+export HOME=/root
+export TERM=linux
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Run shell from root's home
+cd /root
+
+# Source profile if it exists
+if [ -f /root/.profile ]; then
+    . /root/.profile
+elif [ -f /root/.bashrc ]; then
+    . /root/.bashrc
+fi
+
+# If bash exists, run it; otherwise fall back to sh
+if [ -x /bin/bash ]; then
+    exec /bin/bash -l
+else
+    exec /bin/sh
+fi
+"#;
+    std::fs::write(&init_script, content)?;
+    std::fs::set_permissions(&init_script, std::fs::Permissions::from_mode(0o755))?;
 
     Ok(())
 }
@@ -335,7 +387,7 @@ DHCP=yes
     Ok(())
 }
 
-fn setup_console(rootfs: &Path, distro: &str) -> Result<()> {
+fn setup_console(rootfs: &Path, distro: &str, command: &[String]) -> Result<()> {
     debug!("Setting up console for {}", distro);
 
     // Create /etc/securetty if it doesn't exist (allow root login on console)
@@ -368,8 +420,46 @@ fn setup_console(rootfs: &Path, distro: &str) -> Result<()> {
     if bashrc.exists() {
         let _ = std::fs::set_permissions(&bashrc, std::fs::Permissions::from_mode(0o644));
     }
-    // Write our bashrc (overwrite or create)
-    let content = r#"# ~/.bashrc
+
+    // If a command is specified, create a profile that runs the command and exits
+    if !command.is_empty() {
+        // Escape the command for shell
+        let escaped_cmd: Vec<String> = command.iter()
+            .map(|arg| shell_escape(arg))
+            .collect();
+        let cmd_str = escaped_cmd.join(" ");
+
+        // Create a profile that runs the command and poweroffs
+        // Use multiple methods to try to shutdown since not all images have poweroff
+        let content = format!(r#"# ~/.bashrc - auto-generated for command execution
+export TERM=xterm-256color
+export HOME=/root
+cd /root
+
+# Run the specified command
+{}
+
+# Power off after command completes using multiple fallback methods
+# Method 1: poweroff command
+if command -v poweroff >/dev/null 2>&1; then
+    exec poweroff -f
+fi
+# Method 2: halt command
+if command -v halt >/dev/null 2>&1; then
+    exec halt -f -p
+fi
+# Method 3: SysRq trigger (works on any Linux kernel)
+echo o > /proc/sysrq-trigger 2>/dev/null || true
+# Method 4: reboot syscall via shell (last resort)
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
+echo o > /proc/sysrq-trigger 2>/dev/null || true
+# If all else fails, just exit
+exit 0
+"#, cmd_str);
+        let _ = std::fs::write(&bashrc, content);
+    } else {
+        // Interactive mode - write normal bashrc
+        let content = r#"# ~/.bashrc
 export PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 export TERM=xterm-256color
 alias ls='ls --color=auto'
@@ -379,7 +469,8 @@ alias grep='grep --color=auto'
 echo "Welcome to vmm!"
 echo ""
 "#;
-    let _ = std::fs::write(&bashrc, content);
+        let _ = std::fs::write(&bashrc, content);
+    }
 
     // Create .profile too
     let profile = root_home.join(".profile");
@@ -389,6 +480,16 @@ echo ""
     let _ = std::fs::write(&profile, "[ -f ~/.bashrc ] && . ~/.bashrc\n");
 
     Ok(())
+}
+
+/// Escape a string for use in a shell command
+fn shell_escape(s: &str) -> String {
+    // If the string contains only safe characters, return as-is
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/') {
+        return s.to_string();
+    }
+    // Otherwise, wrap in single quotes and escape any single quotes
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn fix_permissions(rootfs: &Path) -> Result<()> {
