@@ -175,13 +175,24 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
     }
 
     // Set up vsock port for shell access if path provided
+    // We create a listening Unix socket on the host side.
+    // With listen=false, libkrun will connect to our socket when guest uses vsock.
+    // Guest runs socat to listen on vsock port and spawn shells.
+    // Host connects to Unix socket, libkrun proxies to guest's vsock listener.
     if let Some(ref vsock_path) = config.vsock_path {
         debug!("Setting up vsock port {} -> {}", VSOCK_SHELL_PORT, vsock_path);
         // Remove existing socket file if present
         let _ = std::fs::remove_file(vsock_path);
-        // listen=true means the host creates the socket and the guest connects to it
-        ctx.add_vsock_port2(VSOCK_SHELL_PORT, vsock_path, true)
+
+        // Create a listening Unix socket that libkrun will connect to
+        // This socket exists before the VM starts so `vmm attach` can find it
+        create_vsock_socket(vsock_path)?;
+
+        // Tell libkrun about the vsock port mapping
+        // listen=false means libkrun connects to our existing socket
+        ctx.add_vsock_port2(VSOCK_SHELL_PORT, vsock_path, false)
             .map_err(|e| anyhow::anyhow!("Failed to add vsock port: {}", e))?;
+        debug!("Configured vsock port mapping with pre-created listening socket");
     }
 
     // Set kernel and initrd for direct boot
@@ -224,6 +235,36 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
     // Start the VM - this doesn't return on success
     ctx.start_enter()
         .map_err(|e| anyhow::anyhow!("VM exited with error: {}", e))
+}
+
+/// Create a Unix socket file at the specified path
+///
+/// This creates a listening Unix socket that can be used for vsock communication.
+/// The socket file will exist before the VM starts, so `vmm attach` can find it.
+fn create_vsock_socket(path: &str) -> Result<()> {
+    use std::os::unix::net::UnixListener;
+    use std::path::Path;
+
+    let socket_path = Path::new(path);
+
+    // Create parent directory if needed
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)
+            .context("Failed to create socket parent directory")?;
+    }
+
+    // Create the listening socket
+    // Note: We create and immediately "forget" the listener to leave the socket file
+    // libkrun will handle the actual listening/accepting when the VM runs
+    let _listener = UnixListener::bind(socket_path)
+        .context(format!("Failed to create Unix socket at {}", path))?;
+
+    // We need to keep the listener alive but not drop it (which would remove the socket)
+    // So we leak it intentionally - the socket file will persist until the process ends
+    std::mem::forget(_listener);
+
+    debug!("Created vsock socket at {}", path);
+    Ok(())
 }
 
 /// Detect kernel format from file magic

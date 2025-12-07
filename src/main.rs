@@ -95,13 +95,32 @@ async fn cmd_run(
     // Check if there's an existing VM for this image that we can reuse
     let mut store = VmStore::load(paths)?;
     store.refresh_status();
+    store.save(paths)?; // Save any status updates from refresh
+
+    // Check if there's a VM currently being created for this image
+    if let Some(creating_vm) = store.find_creating_by_image(image) {
+        eprintln!("VM '{}' is currently being created for image '{}'.", creating_vm.name, image);
+        eprintln!("Please wait for the current creation to complete.");
+        return Ok(());
+    }
 
     // Check if there's a running VM for this image - attach to it instead
     if let Some(running_vm) = store.find_running_by_image(image) {
-        eprintln!("Found running VM '{}' for image '{}', attaching...", running_vm.name, image);
-        let vm_id = running_vm.id.clone();
-        drop(store); // Release the store before calling cmd_attach
-        return cmd_attach(paths, &vm_id).await;
+        let vsock_path = paths.vm_vsock(&running_vm.id);
+        if vsock_path.exists() {
+            // VM is running and has vsock socket - attach to it
+            eprintln!("Found running VM '{}' for image '{}', attaching...", running_vm.name, image);
+            let vm_id = running_vm.id.clone();
+            drop(store); // Release the store before calling cmd_attach
+            return cmd_attach(paths, &vm_id).await;
+        } else {
+            // VM is running but vsock socket doesn't exist yet
+            // This can happen if the guest hasn't started the vsock service
+            // or if libkrun hasn't created the socket yet
+            eprintln!("VM '{}' is already running for image '{}'.", running_vm.name, image);
+            eprintln!("Use 'vmm attach {}' once the VM's vsock service is ready.", running_vm.name);
+            return Ok(());
+        }
     }
 
     // Check if there's a stopped VM we can restart
@@ -169,6 +188,22 @@ async fn cmd_run(
     // Progress output - always shown to user (eprintln goes to stderr)
     eprintln!("Creating VM '{}' from image '{}'", vm_name, image);
 
+    // Save VM state early with "Creating" status to prevent race conditions
+    // This ensures a second `vmm run` will see this VM is being created
+    let mut vm_state = VmState::new(
+        vm_id.clone(),
+        vm_name.clone(),
+        image.to_string(),
+        "unknown".to_string(), // distro will be detected later
+    );
+    vm_state.vcpus = cpus;
+    vm_state.ram_mib = memory;
+    vm_state.pid = Some(std::process::id());
+    // status is already Creating from VmState::new()
+
+    store.add(vm_state);
+    store.save(paths)?;
+
     // Pull the image
     eprintln!("Pulling image...");
     let image_info = pull_image(image).await
@@ -209,22 +244,13 @@ async fn cmd_run(
     vm::disk::install_bootloader(&disk_path, &kernel.kernel_path, &kernel.initrd_path).await
         .context("Failed to install bootloader")?;
 
-    // Create VM state
-    let mut vm_state = VmState::new(
-        vm_id.clone(),
-        vm_name.clone(),
-        image.to_string(),
-        distro.clone(),
-    );
-    vm_state.vcpus = cpus;
-    vm_state.ram_mib = memory;
-    vm_state.status = VmStatus::Running;
-    vm_state.started_at = Some(Utc::now());
-    vm_state.pid = Some(std::process::id());
-
-    // Save VM state
+    // Update VM state from Creating to Running, with detected distro
     let mut store = VmStore::load(paths)?;
-    store.add(vm_state);
+    if let Some(vm) = store.get_mut(&vm_id) {
+        vm.distro = distro.clone();
+        vm.status = VmStatus::Running;
+        vm.started_at = Some(Utc::now());
+    }
     store.save(paths)?;
 
     eprintln!("Starting VM '{}' with {} vCPUs and {} MiB RAM...", vm_name, cpus, memory);

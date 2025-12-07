@@ -352,7 +352,7 @@ async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_si
             // On macOS/Apple Silicon, we need 16k page kernels
             // Ubuntu provides linux-image-generic-64k-hwe for ARM64 which has 64k pages
             // but we can also use linux-image-generic which on ARM64 is typically 4k
-            // Also install systemd for init
+            // Also install systemd for init, and socat for vsock shell support
             // Extract uncompressed Image from vmlinuz for libkrun compatibility
             // The Ubuntu kernel is gzip-compressed on ARM64 and libkrun-efi on aarch64
             // only supports RAW format, so we must decompress it
@@ -362,7 +362,7 @@ async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_si
             // is installed
             format!(r#"
 FROM {}
-RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip initramfs-tools && \
+RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip initramfs-tools socat && \
     # Add virtiofs to initramfs modules for home directory sharing \
     echo "virtiofs" >> /etc/initramfs-tools/modules && \
     # Get kernel version \
@@ -387,11 +387,12 @@ RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip i
             if page_size == PageSize::Page16k {
                 // For 16K page kernel, we need to enable Fedora Asahi COPR repo
                 // Include virtio and virtiofs drivers for proper VM boot and home sharing
+                // Also install socat for vsock shell support
                 format!(r#"
 FROM {}
 RUN dnf install -y 'dnf-command(copr)' && \
     dnf copr enable -y @asahi/kernel && \
-    dnf install -y --setopt=install_weak_deps=False kernel-16k-core dracut systemd zstd && \
+    dnf install -y --setopt=install_weak_deps=False kernel-16k-core dracut systemd zstd socat && \
     cp /lib/modules/*/vmlinuz /out-vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "base bash shutdown" \
@@ -407,9 +408,10 @@ RUN dnf install -y 'dnf-command(copr)' && \
             } else {
                 // For 4K page kernel, use standard kernel-core
                 // Include virtio and virtiofs drivers for proper VM boot and home sharing
+                // Also install socat for vsock shell support
                 format!(r#"
 FROM {}
-RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd && \
+RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd socat && \
     cp /lib/modules/*/vmlinuz /out-vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "base bash shutdown" \
@@ -428,10 +430,11 @@ RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd z
             // CentOS Stream 10 uses dnf similar to Fedora
             // CentOS doesn't have 16K kernels available, so we use 4K kernel for both
             // Include virtio and virtiofs drivers for proper VM boot and home sharing
+            // Also install socat for vsock shell support
             // Output files use /out-* prefix for consistency with debian/ubuntu docker cp
             format!(r#"
 FROM {}
-RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd && \
+RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd socat && \
     cp /lib/modules/*/vmlinuz /out-vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "base bash shutdown" \

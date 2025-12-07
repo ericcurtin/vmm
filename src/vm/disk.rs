@@ -132,7 +132,7 @@ losetup -d "$LOOP"
         ])
         .output()
         .await
-        .context("Failed to run Docker container for disk creation")?;
+        .context("Failed to run docker container for disk creation")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

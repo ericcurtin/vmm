@@ -598,40 +598,35 @@ DHCP=yes
 
 /// Set up vsock shell service for multi-terminal attach support
 ///
-/// This creates a systemd service that connects to the host via vsock port 5000
-/// and spawns a shell for each connection. With libkrun, the guest initiates
-/// the connection to the host's Unix socket.
+/// This creates a systemd service that listens on vsock port 5000.
+/// When the host connects via the Unix socket, libkrun proxies the connection
+/// to this service in the guest, which spawns a shell.
 fn setup_vsock_shell_service(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
     debug!("Setting up vsock shell service for user {}", user.username);
 
-    // Create the vsock shell script that will connect to the host
+    // Create the vsock shell script that listens for connections
     let sbin_dir = rootfs.join("usr/local/sbin");
     std::fs::create_dir_all(&sbin_dir)?;
 
-    // The script connects to vsock CID 2 (host) port 5000 and spawns a shell
-    // CID 2 is always the host in virtio-vsock
+    // The script listens on vsock port 5000 and spawns a shell for each connection
+    // Using VSOCK-LISTEN since we use listen=true on the host side (libkrun creates listening socket)
     let script_content = format!(r#"#!/bin/bash
-# vsock-shell: Connect to host via vsock and spawn a shell
-# This runs in a loop, reconnecting when disconnected
+# vsock-shell: Listen on vsock and spawn a shell for each connection
+# This runs in a loop, accepting new connections
 
 VSOCK_PORT=5000
-HOST_CID=2
 
 while true; do
     # Check if socat is available
     if command -v socat >/dev/null 2>&1; then
-        # Use socat to connect vsock to a PTY running bash
-        socat VSOCK-CONNECT:$HOST_CID:$VSOCK_PORT EXEC:"/bin/bash -li",pty,stderr,setsid,sigint,sane,ctty 2>/dev/null
+        # Use socat to listen on vsock and spawn bash for each connection
+        # fork allows multiple connections, reuseaddr allows quick restart
+        socat VSOCK-LISTEN:$VSOCK_PORT,fork,reuseaddr EXEC:"/bin/bash -li",pty,stderr,setsid,sigint,sane,ctty 2>/dev/null
     else
-        # Fallback: try to use /dev/vsock directly (if available)
-        # This is less reliable but may work on some systems
-        exec 3<>/dev/vsock/$HOST_CID/$VSOCK_PORT 2>/dev/null
-        if [ $? -eq 0 ]; then
-            /bin/bash -li <&3 >&3 2>&3
-            exec 3>&-
-        fi
+        # socat not available, try a simpler approach
+        sleep 5
     fi
-    # Wait before reconnecting
+    # Brief wait before restarting if socat exits
     sleep 1
 done
 "#);

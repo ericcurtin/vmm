@@ -226,15 +226,27 @@ impl VmStore {
         })
     }
 
+    /// Find a VM that is currently being created for this image
+    pub fn find_creating_by_image(&self, image: &str) -> Option<&VmState> {
+        self.vms.values().find(|vm| {
+            vm.status == VmStatus::Creating && Self::image_matches(&vm.image, image)
+        })
+    }
+
     /// Update VM status based on running processes
     pub fn refresh_status(&mut self) {
         for vm in self.vms.values_mut() {
-            if vm.status == VmStatus::Running {
+            if vm.status == VmStatus::Running || vm.status == VmStatus::Creating {
                 if let Some(pid) = vm.pid {
                     // Check if process is still running
                     let is_running = unsafe { libc::kill(pid as i32, 0) == 0 };
                     if !is_running {
-                        vm.status = VmStatus::Stopped;
+                        // Process died - if it was Creating, it failed; if Running, it stopped
+                        vm.status = if vm.status == VmStatus::Creating {
+                            VmStatus::Failed
+                        } else {
+                            VmStatus::Stopped
+                        };
                         vm.pid = None;
                     }
                 } else {

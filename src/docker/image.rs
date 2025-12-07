@@ -77,6 +77,7 @@ pub async fn pull_image(image: &str) -> Result<ImageInfo> {
 /// Container images typically don't include systemd since containers don't need init.
 /// For VMs, we need systemd to be present. This function creates a new container,
 /// installs the necessary packages, and commits it to a temporary image.
+/// Also installs socat for vsock shell support (multi-terminal attach).
 async fn install_systemd_packages(image: &str) -> Result<String> {
     use rand::Rng;
 
@@ -86,13 +87,13 @@ async fn install_systemd_packages(image: &str) -> Result<String> {
     let random_suffix: u32 = rand::rng().random();
     let temp_image = format!("vmm-temp-{:08x}", random_suffix);
 
-    // Detect package manager and install systemd
+    // Detect package manager and install systemd + socat (for vsock shell)
     // We run a container that installs systemd then commit the result
     let install_cmd = r#"
         if command -v dnf >/dev/null 2>&1; then
-            dnf install -y systemd systemd-libs util-linux passwd sudo
+            dnf install -y systemd systemd-libs util-linux passwd sudo socat
         elif command -v apt-get >/dev/null 2>&1; then
-            apt-get update && apt-get install -y systemd systemd-sysv util-linux passwd sudo
+            apt-get update && apt-get install -y systemd systemd-sysv util-linux passwd sudo socat
         else
             echo "Unknown package manager" && exit 1
         fi
