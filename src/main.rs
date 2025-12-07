@@ -177,7 +177,6 @@ async fn cmd_run(
 
     // Detect distro
     let distro = vm::setup::detect_distro(&rootfs)?;
-    eprintln!("Detected distribution: {}", distro);
 
     // Prepare rootfs (auto-login, init, etc.)
     eprintln!("Preparing VM rootfs...");
