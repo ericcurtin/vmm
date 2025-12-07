@@ -19,9 +19,7 @@ pub struct VmConfig {
     pub ram_mib: u32,
     pub disk_path: String,
     pub kernel: KernelInfo,
-    /// Command to run (empty for interactive shell)
-    pub command: Vec<String>,
-    /// Quiet mode - suppress logging for cleaner command output
+    /// Quiet mode - suppress logging for cleaner output
     pub quiet: bool,
     /// Host home directory to share with the VM
     pub host_home: Option<String>,
@@ -38,7 +36,6 @@ impl Default for VmConfig {
                 initrd_path: std::path::PathBuf::new(),
                 cmdline: String::new(),
             },
-            command: Vec::new(),
             quiet: false,
             host_home: None,
         }

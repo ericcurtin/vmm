@@ -87,7 +87,7 @@ fn get_kernel_source(distro: &str, _arch: &str) -> Option<KernelSource> {
 /// # Arguments
 /// * `paths` - VMM paths configuration
 /// * `distro` - The detected distro name (e.g., "ubuntu", "fedora")
-/// * `image` - Optional full image name with tag (e.g., "ubuntu:24.04", "fedora:41")
+/// * `image` - Optional full image name with tag (e.g., "ubuntu:24.04", "fedora:43")
 ///             If not provided, uses "latest" tag
 /// * `verbose` - Whether to show verbose output (docker build progress, etc.)
 pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, verbose: bool) -> Result<KernelInfo> {
@@ -140,6 +140,7 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
     let image_ref = image.unwrap_or_else(|| match distro {
         "ubuntu" => "ubuntu:latest",
         "fedora" => "fedora:latest",
+        "centos" => "quay.io/centos/centos:stream10",
         _ => "unknown:latest",
     });
 
@@ -213,11 +214,11 @@ fn get_cmdline(distro: &str) -> String {
     // - rootfstype=ext4: specify filesystem type explicitly
     // - rw: mount root read-write
     // - panic=0: don't reboot on panic (helps debugging)
-    // - rd.shell=0 rd.emergency=reboot: don't drop to dracut emergency shell (Fedora)
+    // - rd.shell=0 rd.emergency=reboot: don't drop to dracut emergency shell (Fedora/CentOS)
     // Note: We don't specify init= so systemd boots naturally
     match distro {
         "ubuntu" => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0".to_string(),
-        "fedora" => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0 rd.shell=0 rd.emergency=reboot".to_string(),
+        "fedora" | "centos" => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0 rd.shell=0 rd.emergency=reboot".to_string(),
         _ => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0".to_string(),
     }
 }
@@ -351,13 +352,18 @@ async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_si
             // On macOS/Apple Silicon, we need 16k page kernels
             // Ubuntu provides linux-image-generic-64k-hwe for ARM64 which has 64k pages
             // but we can also use linux-image-generic which on ARM64 is typically 4k
-            // For now, install generic and hope for the best
             // Also install systemd for init
+            // Extract uncompressed Image from vmlinuz for libkrun compatibility
+            // The Ubuntu kernel is gzip-compressed on ARM64 and libkrun-efi on aarch64
+            // only supports RAW format, so we must decompress it
             format!(r#"
 FROM {}
-RUN apt-get update && apt-get install -y linux-image-generic systemd && \
+RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip && \
     cp /boot/vmlinuz-* /vmlinuz && \
-    cp /boot/initrd.img-* /initrd.img
+    cp /boot/initrd.img-* /initrd.img && \
+    # Extract uncompressed Image from gzip-compressed vmlinuz for libkrun compatibility \
+    # libkrun-efi on aarch64 only supports RAW kernel format, not compressed formats \
+    gunzip -c /vmlinuz > /Image 2>/dev/null || cp /vmlinuz /Image
 "#, image)
         },
         "fedora" => {
@@ -405,7 +411,27 @@ RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd z
 "#, image)
             }
         },
-        _ => return Err(anyhow::anyhow!("Unsupported distro for kernel extraction: {}. Only Ubuntu and Fedora are supported.", distro)),
+        "centos" => {
+            // CentOS Stream 10 uses dnf similar to Fedora
+            // CentOS doesn't have 16K kernels available, so we use 4K kernel for both
+            // Include virtio and base dracut modules for proper VM boot
+            format!(r#"
+FROM {}
+RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd && \
+    cp /lib/modules/*/vmlinuz /vmlinuz && \
+    KVER=$(ls /lib/modules/) && \
+    dracut --no-hostonly --add "base bash shutdown" \
+           --add-drivers "virtio_console virtio_blk virtio_net" \
+           --force /initrd.img $KVER && \
+    # Extract uncompressed Image from PE kernel for libkrun compatibility \
+    # Find zstd magic (28 b5 2f fd) offset and decompress \
+    OFFSET=$(od -A d -t x1 /vmlinuz | grep -m1 "28 b5 2f fd" | awk '{{print $1}}') && \
+    if [ -n "$OFFSET" ]; then \
+        dd if=/vmlinuz bs=1 skip=$OFFSET 2>/dev/null | zstd -d > /Image 2>/dev/null || true; \
+    fi
+"#, image)
+        },
+        _ => return Err(anyhow::anyhow!("Unsupported distro for kernel extraction: {}. Only Ubuntu, Fedora, and CentOS are supported.", distro)),
     };
 
     // Create temp dir for build context

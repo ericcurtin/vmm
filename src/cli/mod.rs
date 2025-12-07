@@ -46,7 +46,7 @@ pub fn default_memory_mib() -> u32 {
 pub enum Commands {
     /// Run a VM from a container image
     Run {
-        /// The container image to run (e.g., ubuntu, fedora:41)
+        /// The container image to run (e.g., ubuntu, fedora)
         image: String,
 
         /// Number of vCPUs (default: all available)
@@ -60,10 +60,6 @@ pub enum Commands {
         /// Name for the VM
         #[arg(long)]
         name: Option<String>,
-
-        /// Command to run in the VM (if not specified, starts interactive shell)
-        #[arg(trailing_var_arg = true)]
-        command: Vec<String>,
     },
 
     /// List all VMs

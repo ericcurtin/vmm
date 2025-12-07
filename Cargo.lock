@@ -2071,6 +2071,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "libc",
+ "once_cell",
  "rand",
  "reqwest",
  "serde",

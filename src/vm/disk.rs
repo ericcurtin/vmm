@@ -62,6 +62,22 @@ async fn create_disk_via_docker(rootfs: &Path, disk_path: &Path) -> Result<()> {
     let disk_abs = fs::canonicalize(disk_path)
         .context("Failed to get absolute path for disk")?;
 
+    // Fix permissions on execute-only files BEFORE running Docker
+    // Files like sudo have ---s--x--x (execute-only, no read) which prevents
+    // Docker from accessing them through bind mounts on macOS.
+    // We add read permission on the macOS side so Docker/tar can read them.
+    debug!("Fixing permissions on execute-only files in rootfs...");
+    let chmod_output = Command::new("find")
+        .arg(&rootfs_abs)
+        .args(["-type", "f", "-perm", "+111", "!", "-perm", "+444", "-exec", "chmod", "u+r", "{}", ";"])
+        .output()
+        .await
+        .context("Failed to run find command to fix permissions")?;
+
+    if !chmod_output.status.success() {
+        debug!("find/chmod warning (non-fatal): {}", String::from_utf8_lossy(&chmod_output.stderr));
+    }
+
     // Script to format disk and copy rootfs
     let script = r#"
 set -e
@@ -75,10 +91,8 @@ mkfs.ext4 -F -L rootfs "$LOOP"
 # Mount and copy
 mount "$LOOP" /mnt
 
-# Copy rootfs - use rsync for better permission handling
-# Some files like /etc/gshadow may have no read permission on host
-# We copy what we can and set proper ownership afterward
-rsync -a --ignore-errors /rootfs/ /mnt/ 2>/dev/null || cp -a /rootfs/. /mnt/ 2>/dev/null || true
+# Copy rootfs using tar (preserves permissions and handles special files)
+cd /rootfs && tar cf - . | (cd /mnt && tar xf -)
 
 # Recreate files that might have failed to copy with correct permissions
 # These are security-sensitive files in Fedora that have no read perms
@@ -87,8 +101,20 @@ if [ ! -f /mnt/etc/gshadow ]; then
     chmod 000 /mnt/etc/gshadow
 fi
 
-# Ensure proper permissions
-chown -R root:root /mnt/ 2>/dev/null || true
+# Ensure proper permissions on security files
+chown -R root:root /mnt/etc/sudoers.d 2>/dev/null || true
+chmod 0755 /mnt/etc/sudoers.d 2>/dev/null || true
+chmod 0440 /mnt/etc/sudoers.d/* 2>/dev/null || true
+
+# Fix sudo permissions - needs setuid and execute-only (4111)
+if [ -f /mnt/usr/bin/sudo ]; then
+    chown root:root /mnt/usr/bin/sudo
+    chmod 4111 /mnt/usr/bin/sudo
+fi
+if [ -f /mnt/usr/bin/sudoedit ]; then
+    chown root:root /mnt/usr/bin/sudoedit
+    chmod 4111 /mnt/usr/bin/sudoedit
+fi
 
 # Sync and unmount
 sync
@@ -99,7 +125,7 @@ losetup -d "$LOOP"
     let output = Command::new("docker")
         .args([
             "run", "--rm", "--privileged",
-            "-v", &format!("{}:/rootfs:ro", rootfs_abs.display()),
+            "-v", &format!("{}:/rootfs", rootfs_abs.display()),
             "-v", &format!("{}:/disk.raw", disk_abs.display()),
             "ubuntu:24.04",
             "bash", "-c", script,

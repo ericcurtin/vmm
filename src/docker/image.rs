@@ -92,8 +92,6 @@ async fn install_systemd_packages(image: &str) -> Result<String> {
             dnf install -y systemd systemd-libs util-linux passwd sudo
         elif command -v apt-get >/dev/null 2>&1; then
             apt-get update && apt-get install -y systemd systemd-sysv util-linux passwd sudo
-        elif command -v apk >/dev/null 2>&1; then
-            echo "Alpine is not supported - systemd required" && exit 1
         else
             echo "Unknown package manager" && exit 1
         fi

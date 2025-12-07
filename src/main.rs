@@ -16,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use cli::{Cli, Commands, default_cpus, default_memory_mib};
-use docker::{extract_image, pull_image};
+use docker::{extract_image, pull_image, resolve_shortname};
 use storage::{VmState, VmStatus, VmStore, VmmPaths};
 use vm::{create_disk_image, ensure_kernel, prepare_vm_rootfs, run_vm, HostUserInfo};
 
@@ -26,7 +26,6 @@ async fn main() -> Result<()> {
 
     // Detect if we're running a VM (suppress logging unless --verbose)
     let is_run_command = matches!(&cli.command, Commands::Run { .. });
-    let command_mode = matches!(&cli.command, Commands::Run { command, .. } if !command.is_empty());
 
     // Set up logging - suppress for vmm run for cleaner output (unless verbose)
     let quiet = is_run_command && !cli.verbose;
@@ -52,10 +51,10 @@ async fn main() -> Result<()> {
     paths.ensure_dirs()?;
 
     match cli.command {
-        Commands::Run { image, cpus, memory, name, command } => {
+        Commands::Run { image, cpus, memory, name } => {
             let cpus = cpus.unwrap_or_else(default_cpus);
             let memory = memory.unwrap_or_else(default_memory_mib);
-            cmd_run(&paths, &image, cpus, memory, name, command, quiet).await
+            cmd_run(&paths, &image, cpus, memory, name, quiet).await
         }
         Commands::Images | Commands::Ls => {
             cmd_list(&paths).await
@@ -87,9 +86,12 @@ async fn cmd_run(
     cpus: u8,
     memory: u32,
     name: Option<String>,
-    command: Vec<String>,
     quiet: bool,
 ) -> Result<()> {
+    // Resolve shortnames (e.g., "centos" -> "quay.io/centos/centos")
+    let resolved_image = resolve_shortname(image);
+    let image = resolved_image.as_str();
+
     // Check if there's an existing stopped VM for this image that we can reuse
     let mut store = VmStore::load(paths)?;
     store.refresh_status();
@@ -129,7 +131,6 @@ async fn cmd_run(
                 ram_mib: memory,
                 disk_path: disk_path.to_string_lossy().to_string(),
                 kernel,
-                command: command.clone(),
                 quiet,
                 host_home: Some(host_user.home_dir.clone()),
             };
@@ -181,7 +182,7 @@ async fn cmd_run(
 
     // Prepare rootfs (auto-login, init, etc.)
     info!("Preparing VM rootfs...");
-    prepare_vm_rootfs(&rootfs, &distro, &command).await
+    prepare_vm_rootfs(&rootfs, &distro).await
         .context("Failed to prepare rootfs")?;
 
     // Ensure kernel is available
@@ -229,7 +230,6 @@ async fn cmd_run(
         ram_mib: memory,
         disk_path: disk_path.to_string_lossy().to_string(),
         kernel,
-        command: command.clone(),
         quiet,
         host_home: Some(host_user.home_dir.clone()),
     };
@@ -397,7 +397,6 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
         ram_mib,
         disk_path: disk_path.to_string_lossy().to_string(),
         kernel,
-        command: Vec::new(), // No command for start - interactive mode
         quiet: false,
         host_home: Some(host_user.home_dir.clone()),
     };
@@ -446,9 +445,11 @@ async fn cmd_inspect(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 }
 
 async fn cmd_pull(image: &str) -> Result<()> {
-    info!("Pulling image '{}'...", image);
-    let image_info = pull_image(image).await?;
-    println!("Successfully pulled {}", image);
+    // Resolve shortnames (e.g., "centos" -> "quay.io/centos/centos")
+    let resolved_image = resolve_shortname(image);
+    info!("Pulling image '{}'...", resolved_image);
+    let image_info = pull_image(&resolved_image).await?;
+    println!("Successfully pulled {}", resolved_image);
     println!("Image ID: {}", &image_info.id[..12.min(image_info.id.len())]);
     Ok(())
 }
