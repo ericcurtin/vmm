@@ -273,8 +273,8 @@ async fn cmd_list(paths: &VmmPaths) -> Result<()> {
         let created_ago = format_relative_time(vm.created_at);
         println!(
             "{:<15} {:<33} {:<7} {:<6} {:<10}",
-            truncate(&vm.name, 20),
-            truncate(&vm.image, 40),
+            truncate(&vm.name, 15),
+            truncate(&vm.image, 33),
             vm.status,
             memory_str,
             created_ago
