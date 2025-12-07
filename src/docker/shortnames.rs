@@ -109,7 +109,12 @@ pub fn resolve_shortname(image: &str) -> String {
         if let Some(t) = tag {
             format!("{}:{}", full_name, t)
         } else {
-            full_name.to_string()
+            // For centos, we need a default tag since bare "centos" image is deprecated
+            if name == "centos" {
+                format!("{}:stream10", full_name)
+            } else {
+                full_name.to_string()
+            }
         }
     } else {
         // Unknown short name, return as-is (Docker will use default registry)
@@ -135,8 +140,10 @@ mod tests {
 
     #[test]
     fn test_resolve_centos() {
-        assert_eq!(resolve_shortname("centos"), "quay.io/centos/centos");
-        assert_eq!(resolve_shortname("centos:stream10"), "quay.io/centos/centos:stream10");
+        // "centos" without tag defaults to stream10
+        assert_eq!(resolve_shortname("centos"), "quay.io/centos/centos:stream10");
+        // "centos:stream9" uses the explicit tag
+        assert_eq!(resolve_shortname("centos:stream9"), "quay.io/centos/centos:stream9");
     }
 
     #[test]

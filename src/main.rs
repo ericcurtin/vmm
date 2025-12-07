@@ -257,30 +257,82 @@ async fn cmd_list(paths: &VmmPaths) -> Result<()> {
         return Ok(());
     }
 
-    // Print header
-    println!("{:<12}  {:<20}  {:<15}  {:<10}  {:>5}  {:>8}  {}",
-        "VM ID", "NAME", "IMAGE", "STATUS", "CPUS", "MEMORY", "CREATED");
-    println!("{}", "-".repeat(95));
+    // Print header (Docker-style) - use consistent column widths
+    println!(
+        "{:<15} {:<33} {:<7} {:<6} {:<10}",
+        "NAME", "IMAGE", "STATUS", "MEMORY", "CREATED"
+    );
 
     for vm in vms {
-        let created = vm.created_at.format("%Y-%m-%d %H:%M");
         // Format memory nicely (e.g., 2Gi, 16Gi, 512Mi)
         let memory_str = if vm.ram_mib >= 1024 && vm.ram_mib % 1024 == 0 {
             format!("{}Gi", vm.ram_mib / 1024)
         } else {
             format!("{}Mi", vm.ram_mib)
         };
-        println!("{:<12}  {:<20}  {:<15}  {:<10}  {:>5}  {:>8}  {}",
-            vm.short_id(),
+        let created_ago = format_relative_time(vm.created_at);
+        println!(
+            "{:<15} {:<33} {:<7} {:<6} {:<10}",
             truncate(&vm.name, 20),
-            truncate(&vm.image, 15),
+            truncate(&vm.image, 40),
             vm.status,
-            vm.vcpus,
             memory_str,
-            created);
+            created_ago
+        );
     }
 
     Ok(())
+}
+
+/// Format a DateTime as relative time (e.g., "5 minutes ago", "2 hours ago")
+fn format_relative_time(dt: chrono::DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(dt);
+
+    let seconds = duration.num_seconds();
+    if seconds < 0 {
+        return "just now".to_string();
+    }
+
+    let minutes = duration.num_minutes();
+    let hours = duration.num_hours();
+    let days = duration.num_days();
+    let weeks = days / 7;
+
+    if seconds < 60 {
+        if seconds == 1 {
+            "1 second ago".to_string()
+        } else {
+            format!("{} seconds ago", seconds)
+        }
+    } else if minutes < 60 {
+        if minutes == 1 {
+            "1 minute ago".to_string()
+        } else {
+            format!("{} minutes ago", minutes)
+        }
+    } else if hours < 24 {
+        if hours == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{} hours ago", hours)
+        }
+    } else if days < 7 {
+        if days == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{} days ago", days)
+        }
+    } else if weeks < 4 {
+        if weeks == 1 {
+            "1 week ago".to_string()
+        } else {
+            format!("{} weeks ago", weeks)
+        }
+    } else {
+        // For older entries, show the date
+        dt.format("%Y-%m-%d").to_string()
+    }
 }
 
 async fn cmd_stop(paths: &VmmPaths, vm_id: &str) -> Result<()> {

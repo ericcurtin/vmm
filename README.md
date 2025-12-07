@@ -85,7 +85,9 @@ vmm rm <vm-id>
 vmm integrates systemd-based Linux distributions:
 
 - **Fedora** (recommended, uses 16k Fedora Asahi kernel)
+- **CentOS Stream**
 - **Ubuntu**
+- **Debian**
 
 ## How It Works
 

@@ -398,6 +398,9 @@ fn setup_init_with_user(rootfs: &Path, distro: &str, user: &HostUserInfo) -> Res
         "apt-daily.timer",
         "apt-daily-upgrade.timer",
         "unattended-upgrades.service",
+        // binfmt_misc requires kernel module not available in VM
+        "proc-sys-fs-binfmt_misc.automount",
+        "proc-sys-fs-binfmt_misc.mount",
     ];
 
     let mask_dir = rootfs.join("etc/systemd/system");

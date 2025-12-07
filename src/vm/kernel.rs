@@ -216,12 +216,13 @@ fn get_cmdline(distro: &str) -> String {
     // - rootfstype=ext4: specify filesystem type explicitly
     // - rw: mount root read-write
     // - panic=0: don't reboot on panic (helps debugging)
+    // - quiet loglevel=0: suppress kernel boot messages
     // - rd.shell=0 rd.emergency=reboot: don't drop to dracut emergency shell (Fedora/CentOS)
     // Note: We don't specify init= so systemd boots naturally
     match distro {
-        "ubuntu" => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0".to_string(),
-        "fedora" | "centos" => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0 rd.shell=0 rd.emergency=reboot".to_string(),
-        _ => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0".to_string(),
+        "ubuntu" => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0 quiet loglevel=0".to_string(),
+        "fedora" | "centos" => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0 quiet loglevel=0 rd.shell=0 rd.emergency=reboot".to_string(),
+        _ => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0 quiet loglevel=0".to_string(),
     }
 }
 
@@ -358,9 +359,16 @@ async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_si
             // Extract uncompressed Image from vmlinuz for libkrun compatibility
             // The Ubuntu kernel is gzip-compressed on ARM64 and libkrun-efi on aarch64
             // only supports RAW format, so we must decompress it
+            // Regenerate initramfs with virtiofs support for home directory sharing
             format!(r#"
 FROM {}
-RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip && \
+RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip initramfs-tools && \
+    # Add virtiofs to initramfs modules for home directory sharing \
+    echo "virtiofs" >> /etc/initramfs-tools/modules && \
+    # Get kernel version \
+    KVER=$(ls /lib/modules/ | head -1) && \
+    # Regenerate initramfs with virtiofs module \
+    update-initramfs -u -k $KVER && \
     cp /boot/vmlinuz-* /vmlinuz && \
     cp /boot/initrd.img-* /initrd.img && \
     # Extract uncompressed Image from gzip-compressed vmlinuz for libkrun compatibility \
@@ -375,7 +383,7 @@ RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip &
             // Also extract the uncompressed Image from the PE kernel for libkrun compatibility
             if page_size == PageSize::Page16k {
                 // For 16K page kernel, we need to enable Fedora Asahi COPR repo
-                // Include virtio and base dracut modules for proper VM boot
+                // Include virtio and virtiofs drivers for proper VM boot and home sharing
                 format!(r#"
 FROM {}
 RUN dnf install -y 'dnf-command(copr)' && \
@@ -384,7 +392,7 @@ RUN dnf install -y 'dnf-command(copr)' && \
     cp /lib/modules/*/vmlinuz /vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "base bash shutdown" \
-           --add-drivers "virtio_console virtio_blk virtio_net" \
+           --add-drivers "virtio_console virtio_blk virtio_net virtiofs" \
            --force /initrd.img $KVER && \
     # Extract uncompressed Image from PE kernel for libkrun compatibility \
     # Find zstd magic (28 b5 2f fd) offset and decompress \
@@ -395,14 +403,14 @@ RUN dnf install -y 'dnf-command(copr)' && \
 "#, image)
             } else {
                 // For 4K page kernel, use standard kernel-core
-                // Include virtio and base dracut modules for proper VM boot
+                // Include virtio and virtiofs drivers for proper VM boot and home sharing
                 format!(r#"
 FROM {}
 RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd && \
     cp /lib/modules/*/vmlinuz /vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "base bash shutdown" \
-           --add-drivers "virtio_console virtio_blk virtio_net" \
+           --add-drivers "virtio_console virtio_blk virtio_net virtiofs" \
            --force /initrd.img $KVER && \
     # Extract uncompressed Image from PE kernel for libkrun compatibility \
     # Find zstd magic (28 b5 2f fd) offset and decompress \
@@ -416,14 +424,14 @@ RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd z
         "centos" => {
             // CentOS Stream 10 uses dnf similar to Fedora
             // CentOS doesn't have 16K kernels available, so we use 4K kernel for both
-            // Include virtio and base dracut modules for proper VM boot
+            // Include virtio and virtiofs drivers for proper VM boot and home sharing
             format!(r#"
 FROM {}
 RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd && \
     cp /lib/modules/*/vmlinuz /vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "base bash shutdown" \
-           --add-drivers "virtio_console virtio_blk virtio_net" \
+           --add-drivers "virtio_console virtio_blk virtio_net virtiofs" \
            --force /initrd.img $KVER && \
     # Extract uncompressed Image from PE kernel for libkrun compatibility \
     # Find zstd magic (28 b5 2f fd) offset and decompress \
