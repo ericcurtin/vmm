@@ -14,9 +14,7 @@ vmm lets you run container images as lightweight virtual machines on macOS, prov
 
 ## Requirements
 
-- macOS (Apple Silicon or Intel)
 - Docker (for pulling container images)
-- Rust toolchain (for building from source)
 
 ## Installation
 
@@ -101,7 +99,7 @@ vmm integrates systemd-based Linux distributions:
 ## Data Storage
 
 VM data is stored in:
-- macOS: `~/Library/Application Support/vmm/`
+- `~/.vmm`
 
 This includes:
 - `vms/` - VM disk images and rootfs

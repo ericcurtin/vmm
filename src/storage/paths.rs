@@ -11,9 +11,10 @@ pub struct VmmPaths {
 impl VmmPaths {
     /// Create a new VmmPaths instance
     pub fn new() -> Result<Self> {
-        let base_dir = dirs::data_local_dir()
-            .context("Could not find local data directory")?
-            .join("vmm");
+        // Use ~/.vmm for consistent path across Linux and macOS (no spaces)
+        let base_dir = dirs::home_dir()
+            .context("Could not find home directory")?
+            .join(".vmm");
 
         Ok(Self { base_dir })
     }

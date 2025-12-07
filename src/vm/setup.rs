@@ -437,15 +437,14 @@ fn setup_systemd_home_mount(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
     // - Wait for systemd-modules-load.service to ensure virtiofs module is available
     // - Not block boot if mount fails (nofail)
     // - Use x-systemd.device-timeout to avoid long hangs
-    // - ConditionPathExists checks if virtiofs tag exists (in /sys/fs/virtiofs/)
+    // Note: We removed ConditionPathExists as virtiofs may be built-in to kernel
+    // (no /sys/module/virtiofs) but still functional
     let mount_content = format!(r#"[Unit]
 Description=Mount host home directory
 After=systemd-modules-load.service
 After=local-fs-pre.target
 Before=local-fs.target
 DefaultDependencies=no
-# Only attempt mount if virtiofs is available
-ConditionPathExists=/sys/module/virtiofs
 
 [Mount]
 What=home
@@ -468,6 +467,23 @@ WantedBy=local-fs.target
             format!("/etc/systemd/system/{}.mount", mount_unit_name),
             &link,
         );
+    }
+
+    // Also add to /etc/fstab as a fallback for distros that may not process
+    // systemd mount units early enough (e.g., some Ubuntu configurations)
+    let fstab_path = rootfs.join("etc/fstab");
+    let fstab_entry = format!("home\t{}\tvirtiofs\trw,nofail\t0\t0\n", user.home_dir);
+
+    let mut fstab_content = if fstab_path.exists() {
+        std::fs::read_to_string(&fstab_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    // Only add if not already present
+    if !fstab_content.contains("home\t") && !fstab_content.contains(&format!("\t{}\t", user.home_dir)) {
+        fstab_content.push_str(&fstab_entry);
+        std::fs::write(&fstab_path, fstab_content)?;
     }
 
     Ok(())
