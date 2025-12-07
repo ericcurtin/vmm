@@ -357,6 +357,9 @@ async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_si
             // The Ubuntu kernel is gzip-compressed on ARM64 and libkrun-efi on aarch64
             // only supports RAW format, so we must decompress it
             // Regenerate initramfs with virtiofs support for home directory sharing
+            // NOTE: The output files are named /out-* to avoid being overwritten by the
+            // kernel package installer which creates /vmlinuz symlinks after the kernel
+            // is installed
             format!(r#"
 FROM {}
 RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip initramfs-tools && \
@@ -366,11 +369,13 @@ RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip i
     KVER=$(ls /lib/modules/ | head -1) && \
     # Regenerate initramfs with virtiofs module \
     update-initramfs -u -k $KVER && \
-    cp /boot/vmlinuz-* /vmlinuz && \
-    cp /boot/initrd.img-* /initrd.img && \
+    # Copy kernel files to /out-* to avoid being overwritten by symlinks \
+    # Must use cat to dereference any existing symlinks \
+    cat /boot/vmlinuz-$KVER > /out-vmlinuz && \
+    cat /boot/initrd.img-$KVER > /out-initrd.img && \
     # Extract uncompressed Image from gzip-compressed vmlinuz for libkrun compatibility \
     # libkrun-efi on aarch64 only supports RAW kernel format, not compressed formats \
-    gunzip -c /vmlinuz > /Image 2>/dev/null || cp /vmlinuz /Image
+    gunzip -c /out-vmlinuz > /out-Image 2>/dev/null || cat /out-vmlinuz > /out-Image
 "#, image)
         },
         "fedora" => {
@@ -378,6 +383,7 @@ RUN apt-get update && apt-get install -y linux-image-generic systemd file gzip i
             // Standard Fedora only has 4K kernels - 16K kernels come from Fedora Asahi COPR
             // Use --setopt=install_weak_deps=False to skip firmware and speed up install
             // Also extract the uncompressed Image from the PE kernel for libkrun compatibility
+            // Output files use /out-* prefix for consistency with debian/ubuntu docker cp
             if page_size == PageSize::Page16k {
                 // For 16K page kernel, we need to enable Fedora Asahi COPR repo
                 // Include virtio and virtiofs drivers for proper VM boot and home sharing
@@ -386,16 +392,16 @@ FROM {}
 RUN dnf install -y 'dnf-command(copr)' && \
     dnf copr enable -y @asahi/kernel && \
     dnf install -y --setopt=install_weak_deps=False kernel-16k-core dracut systemd zstd && \
-    cp /lib/modules/*/vmlinuz /vmlinuz && \
+    cp /lib/modules/*/vmlinuz /out-vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "base bash shutdown" \
            --add-drivers "virtio_console virtio_blk virtio_net virtiofs" \
-           --force /initrd.img $KVER && \
+           --force /out-initrd.img $KVER && \
     # Extract uncompressed Image from PE kernel for libkrun compatibility \
     # Find zstd magic (28 b5 2f fd) offset and decompress \
-    OFFSET=$(od -A d -t x1 /vmlinuz | grep -m1 "28 b5 2f fd" | awk '{{print $1}}') && \
+    OFFSET=$(od -A d -t x1 /out-vmlinuz | grep -m1 "28 b5 2f fd" | awk '{{print $1}}') && \
     if [ -n "$OFFSET" ]; then \
-        dd if=/vmlinuz bs=1 skip=$OFFSET 2>/dev/null | zstd -d > /Image 2>/dev/null || true; \
+        dd if=/out-vmlinuz bs=1 skip=$OFFSET 2>/dev/null | zstd -d > /out-Image 2>/dev/null || true; \
     fi
 "#, image)
             } else {
@@ -404,16 +410,16 @@ RUN dnf install -y 'dnf-command(copr)' && \
                 format!(r#"
 FROM {}
 RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd && \
-    cp /lib/modules/*/vmlinuz /vmlinuz && \
+    cp /lib/modules/*/vmlinuz /out-vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "base bash shutdown" \
            --add-drivers "virtio_console virtio_blk virtio_net virtiofs" \
-           --force /initrd.img $KVER && \
+           --force /out-initrd.img $KVER && \
     # Extract uncompressed Image from PE kernel for libkrun compatibility \
     # Find zstd magic (28 b5 2f fd) offset and decompress \
-    OFFSET=$(od -A d -t x1 /vmlinuz | grep -m1 "28 b5 2f fd" | awk '{{print $1}}') && \
+    OFFSET=$(od -A d -t x1 /out-vmlinuz | grep -m1 "28 b5 2f fd" | awk '{{print $1}}') && \
     if [ -n "$OFFSET" ]; then \
-        dd if=/vmlinuz bs=1 skip=$OFFSET 2>/dev/null | zstd -d > /Image 2>/dev/null || true; \
+        dd if=/out-vmlinuz bs=1 skip=$OFFSET 2>/dev/null | zstd -d > /out-Image 2>/dev/null || true; \
     fi
 "#, image)
             }
@@ -422,19 +428,20 @@ RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd z
             // CentOS Stream 10 uses dnf similar to Fedora
             // CentOS doesn't have 16K kernels available, so we use 4K kernel for both
             // Include virtio and virtiofs drivers for proper VM boot and home sharing
+            // Output files use /out-* prefix for consistency with debian/ubuntu docker cp
             format!(r#"
 FROM {}
 RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd && \
-    cp /lib/modules/*/vmlinuz /vmlinuz && \
+    cp /lib/modules/*/vmlinuz /out-vmlinuz && \
     KVER=$(ls /lib/modules/) && \
     dracut --no-hostonly --add "base bash shutdown" \
            --add-drivers "virtio_console virtio_blk virtio_net virtiofs" \
-           --force /initrd.img $KVER && \
+           --force /out-initrd.img $KVER && \
     # Extract uncompressed Image from PE kernel for libkrun compatibility \
     # Find zstd magic (28 b5 2f fd) offset and decompress \
-    OFFSET=$(od -A d -t x1 /vmlinuz | grep -m1 "28 b5 2f fd" | awk '{{print $1}}') && \
+    OFFSET=$(od -A d -t x1 /out-vmlinuz | grep -m1 "28 b5 2f fd" | awk '{{print $1}}') && \
     if [ -n "$OFFSET" ]; then \
-        dd if=/vmlinuz bs=1 skip=$OFFSET 2>/dev/null | zstd -d > /Image 2>/dev/null || true; \
+        dd if=/out-vmlinuz bs=1 skip=$OFFSET 2>/dev/null | zstd -d > /out-Image 2>/dev/null || true; \
     fi
 "#, image)
         },
@@ -475,16 +482,16 @@ RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd z
         .trim()
         .to_string();
 
-    // Copy kernel and initrd
+    // Copy kernel and initrd (using /out-* paths for debian/ubuntu to avoid symlink issues)
     let mut cp_kernel_cmd = Command::new("docker");
-    cp_kernel_cmd.args(["cp", &format!("{}:/vmlinuz", container_id), dest.join(&kernel_filename).to_str().unwrap()]);
+    cp_kernel_cmd.args(["cp", &format!("{}:/out-vmlinuz", container_id), dest.join(&kernel_filename).to_str().unwrap()]);
     if !verbose {
         cp_kernel_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
     cp_kernel_cmd.status().await?;
 
     let mut cp_initrd_cmd = Command::new("docker");
-    cp_initrd_cmd.args(["cp", &format!("{}:/initrd.img", container_id), dest.join(&initrd_filename).to_str().unwrap()]);
+    cp_initrd_cmd.args(["cp", &format!("{}:/out-initrd.img", container_id), dest.join(&initrd_filename).to_str().unwrap()]);
     if !verbose {
         cp_initrd_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
@@ -493,7 +500,7 @@ RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd z
     // Also copy the uncompressed Image file if it exists (for libkrun compatibility)
     let image_filename = format!("Image{}", suffix);
     let _ = Command::new("docker")
-        .args(["cp", &format!("{}:/Image", container_id), dest.join(&image_filename).to_str().unwrap()])
+        .args(["cp", &format!("{}:/out-Image", container_id), dest.join(&image_filename).to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
