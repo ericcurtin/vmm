@@ -3,21 +3,26 @@
 //! These bindings provide access to libkrun's C API for creating and managing
 //! lightweight virtual machines.
 
-use libc::{c_char, c_int, gid_t, uid_t};
+use libc::{c_char, gid_t, uid_t};
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
 
 // Log levels
 pub const KRUN_LOG_LEVEL_OFF: u32 = 0;
+#[allow(dead_code)]
 pub const KRUN_LOG_LEVEL_ERROR: u32 = 1;
+#[allow(dead_code)]
 pub const KRUN_LOG_LEVEL_WARN: u32 = 2;
+#[allow(dead_code)]
 pub const KRUN_LOG_LEVEL_INFO: u32 = 3;
 pub const KRUN_LOG_LEVEL_DEBUG: u32 = 4;
+#[allow(dead_code)]
 pub const KRUN_LOG_LEVEL_TRACE: u32 = 5;
 
 // Kernel formats
 pub const KRUN_KERNEL_FORMAT_RAW: u32 = 0;
 pub const KRUN_KERNEL_FORMAT_ELF: u32 = 1;
+#[allow(dead_code)]
 pub const KRUN_KERNEL_FORMAT_PE_GZ: u32 = 2;
 pub const KRUN_KERNEL_FORMAT_IMAGE_BZ2: u32 = 3;
 pub const KRUN_KERNEL_FORMAT_IMAGE_GZ: u32 = 4;
@@ -25,9 +30,11 @@ pub const KRUN_KERNEL_FORMAT_IMAGE_ZSTD: u32 = 5;
 
 // Disk formats
 pub const KRUN_DISK_FORMAT_RAW: u32 = 0;
+#[allow(dead_code)]
 pub const KRUN_DISK_FORMAT_QCOW2: u32 = 1;
 
 #[link(name = "krun-efi")]
+#[allow(dead_code)]
 extern "C" {
     /// Sets the log level for the library.
     pub fn krun_set_log_level(level: u32) -> i32;
@@ -118,6 +125,7 @@ pub struct KrunContext {
     ctx_id: u32,
 }
 
+#[allow(dead_code)]
 impl KrunContext {
     /// Create a new libkrun context
     pub fn new() -> Result<Self, i32> {
@@ -283,7 +291,7 @@ impl KrunContext {
         let mut argv_ptrs: Vec<*const c_char> = c_argv.iter().map(|s| s.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
 
-        let (c_envp, envp_ptrs): (Vec<CString>, Vec<*const c_char>) = if let Some(env) = envp {
+        let (_c_envp, envp_ptrs): (Vec<CString>, Vec<*const c_char>) = if let Some(env) = envp {
             let c_env: Vec<CString> = env
                 .iter()
                 .map(|s| CString::new(*s).map_err(|_| -libc::EINVAL))

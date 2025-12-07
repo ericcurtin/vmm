@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 
 use super::paths::VmmPaths;
 
@@ -76,6 +75,7 @@ impl VmState {
     }
 
     /// Generate a short ID (first 12 characters)
+    #[allow(dead_code)]
     pub fn short_id(&self) -> &str {
         &self.id[..12.min(self.id.len())]
     }

@@ -10,6 +10,6 @@ pub mod runner;
 pub mod setup;
 
 pub use disk::create_disk_image;
-pub use kernel::{ensure_kernel, KernelInfo};
+pub use kernel::ensure_kernel;
 pub use runner::run_vm;
 pub use setup::{prepare_vm_rootfs, HostUserInfo};

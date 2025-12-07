@@ -7,11 +7,8 @@
 //! for better performance. Other distros use standard 4k page kernels.
 
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
 use std::path::{Path, PathBuf};
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::storage::VmmPaths;
 
@@ -58,12 +55,14 @@ pub struct KernelInfo {
 }
 
 /// Kernel source URLs for different distributions
+#[allow(dead_code)]
 struct KernelSource {
     kernel_url: &'static str,
     initrd_url: &'static str,
     cmdline: &'static str,
 }
 
+#[allow(dead_code)]
 fn get_kernel_source(distro: &str, _arch: &str) -> Option<KernelSource> {
     // For now, we use a generic approach: extract kernel from container image
     // This is a placeholder - in production we'd download from official sources

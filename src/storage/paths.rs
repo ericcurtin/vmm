@@ -20,6 +20,7 @@ impl VmmPaths {
     }
 
     /// Get the base vmm directory
+    #[allow(dead_code)]
     pub fn base_dir(&self) -> &PathBuf {
         &self.base_dir
     }
@@ -55,6 +56,7 @@ impl VmmPaths {
     }
 
     /// Get the state file path for a specific VM
+    #[allow(dead_code)]
     pub fn vm_state_file(&self, vm_id: &str) -> PathBuf {
         self.vm_dir(vm_id).join("state.json")
     }
@@ -65,11 +67,13 @@ impl VmmPaths {
     }
 
     /// Get the kernel path for a specific distro and architecture
+    #[allow(dead_code)]
     pub fn kernel_path(&self, distro: &str, arch: &str) -> PathBuf {
         self.kernels_dir().join(format!("{}-{}", distro, arch)).join("vmlinuz")
     }
 
     /// Get the initrd path for a specific distro and architecture
+    #[allow(dead_code)]
     pub fn initrd_path(&self, distro: &str, arch: &str) -> PathBuf {
         self.kernels_dir().join(format!("{}-{}", distro, arch)).join("initrd.img")
     }

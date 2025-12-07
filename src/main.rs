@@ -99,7 +99,7 @@ async fn cmd_run(
     if let Some(existing_vm) = store.find_by_image(image) {
         // Reuse existing VM
         let vm_id = existing_vm.id.clone();
-        let vm_name = existing_vm.name.clone();
+        let _vm_name = existing_vm.name.clone();
         let distro = existing_vm.distro.clone();
 
         // Get paths

@@ -126,6 +126,7 @@ pub fn resolve_shortname(image: &str) -> String {
 ///
 /// This is useful for display purposes and VM naming.
 /// Extracts just the image name without registry or tag.
+#[allow(dead_code)]
 pub fn get_base_name(image: &str) -> String {
     // Remove tag first
     let without_tag = image.split(':').next().unwrap_or(image);

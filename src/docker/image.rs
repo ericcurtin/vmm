@@ -10,6 +10,7 @@ use tracing::{debug, info};
 
 /// Information about a Docker image
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ImageInfo {
     pub id: String,
     pub repo_tags: Vec<String>,
@@ -230,6 +231,7 @@ pub async fn extract_image(image: &str, dest: &Path) -> Result<()> {
 }
 
 /// Get list of available Docker images
+#[allow(dead_code)]
 pub async fn list_images() -> Result<Vec<ImageInfo>> {
     let docker = Docker::connect_with_local_defaults()
         .context("Failed to connect to Docker daemon")?;
