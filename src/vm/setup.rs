@@ -160,6 +160,11 @@ fn create_essential_dirs(rootfs: &Path) -> Result<()> {
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o1777));
     }
 
+    // Ensure virtiofs module is loaded at boot
+    let modules_load_dir = rootfs.join("etc/modules-load.d");
+    std::fs::create_dir_all(&modules_load_dir)?;
+    std::fs::write(modules_load_dir.join("virtiofs.conf"), "virtiofs\n")?;
+
     Ok(())
 }
 
