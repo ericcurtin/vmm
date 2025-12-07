@@ -15,6 +15,33 @@ pub struct Cli {
     pub verbose: bool,
 }
 
+/// Get the default number of CPUs (all available on host, capped at 4 for stability)
+pub fn default_cpus() -> u8 {
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get() as u8)
+        .unwrap_or(2);
+    // Cap at 4 for stability with libkrun
+    available.min(4)
+}
+
+/// Get the default memory in MiB (highest power of 2 less than available, capped at 4GB)
+pub fn default_memory_mib() -> u32 {
+    use sysinfo::System;
+
+    let sys = System::new_all();
+    let total_mem_bytes = sys.total_memory();
+    let total_mem_mib = (total_mem_bytes / (1024 * 1024)) as u32;
+
+    // Find highest power of 2 less than total memory
+    // Start from 2^12 (4096 MiB = 4 GiB) - capped for stability with libkrun
+    let mut power_of_2: u32 = 4096;
+    while power_of_2 >= total_mem_mib && power_of_2 > 512 {
+        power_of_2 /= 2;
+    }
+
+    power_of_2
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Run a VM from a container image
@@ -22,13 +49,13 @@ pub enum Commands {
         /// The container image to run (e.g., ubuntu, fedora:41)
         image: String,
 
-        /// Number of vCPUs
-        #[arg(long, default_value = "2")]
-        cpus: u8,
+        /// Number of vCPUs (default: all available)
+        #[arg(long)]
+        cpus: Option<u8>,
 
-        /// Memory in MiB
-        #[arg(long, default_value = "2048")]
-        memory: u32,
+        /// Memory in MiB (default: highest power of 2 less than host memory)
+        #[arg(long)]
+        memory: Option<u32>,
 
         /// Name for the VM
         #[arg(long)]

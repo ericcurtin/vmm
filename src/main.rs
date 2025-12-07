@@ -11,11 +11,11 @@ mod vm;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
-use tracing::{debug, info, Level};
-use tracing_subscriber::{FmtSubscriber, layer::SubscriberExt, util::SubscriberInitExt, fmt, EnvFilter};
+use tracing::{debug, info};
+use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-use cli::{Cli, Commands};
+use cli::{Cli, Commands, default_cpus, default_memory_mib};
 use docker::{extract_image, pull_image};
 use storage::{VmState, VmStatus, VmStore, VmmPaths};
 use vm::{create_disk_image, ensure_kernel, prepare_vm_rootfs, run_vm, HostUserInfo};
@@ -31,11 +31,19 @@ async fn main() -> Result<()> {
     // Set up logging - suppress for vmm run for cleaner output (unless verbose)
     let quiet = is_run_command && !cli.verbose;
     if !quiet {
-        let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
-        let _subscriber = FmtSubscriber::builder()
-            .with_max_level(level)
+        // Filter out noisy third-party crate logs
+        // In verbose mode, show vmm debug + krun/kernel logs for boot sequence
+        let filter = if cli.verbose {
+            EnvFilter::new("vmm=debug,krun=debug,warn")
+        } else {
+            EnvFilter::new("vmm=info,warn")
+        };
+
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
             .with_target(false)
             .without_time()
+            .with_writer(std::io::stderr)
             .init();
     }
 
@@ -45,6 +53,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Run { image, cpus, memory, name, command } => {
+            let cpus = cpus.unwrap_or_else(default_cpus);
+            let memory = memory.unwrap_or_else(default_memory_mib);
             cmd_run(&paths, &image, cpus, memory, name, command, quiet).await
         }
         Commands::Images | Commands::Ls => {
@@ -250,19 +260,25 @@ async fn cmd_list(paths: &VmmPaths) -> Result<()> {
     }
 
     // Print header
-    println!("{:<12} {:<20} {:<15} {:<10} {:<8} {:<8} {}",
+    println!("{:<12}  {:<20}  {:<15}  {:<10}  {:>5}  {:>8}  {}",
         "VM ID", "NAME", "IMAGE", "STATUS", "CPUS", "MEMORY", "CREATED");
-    println!("{}", "-".repeat(90));
+    println!("{}", "-".repeat(95));
 
     for vm in vms {
         let created = vm.created_at.format("%Y-%m-%d %H:%M");
-        println!("{:<12} {:<20} {:<15} {:<10} {:<8} {:<8} {}",
+        // Format memory nicely (e.g., 2Gi, 16Gi, 512Mi)
+        let memory_str = if vm.ram_mib >= 1024 && vm.ram_mib % 1024 == 0 {
+            format!("{}Gi", vm.ram_mib / 1024)
+        } else {
+            format!("{}Mi", vm.ram_mib)
+        };
+        println!("{:<12}  {:<20}  {:<15}  {:<10}  {:>5}  {:>8}  {}",
             vm.short_id(),
             truncate(&vm.name, 20),
             truncate(&vm.image, 15),
             vm.status,
             vm.vcpus,
-            format!("{}Mi", vm.ram_mib),
+            memory_str,
             created);
     }
 

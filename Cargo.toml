@@ -51,5 +51,11 @@ futures-util = "0.3"
 # Temp files
 tempfile = "3"
 
+# System info (CPU count, memory)
+sysinfo = "0.32"
+
+# Random numbers
+rand = "0.9"
+
 [build-dependencies]
 cc = "1"

@@ -10,7 +10,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use tracing::{debug, info};
 
-use super::krun_ffi::{KrunContext, KRUN_DISK_FORMAT_RAW, KRUN_LOG_LEVEL_WARN};
+use super::krun_ffi::{KrunContext, KRUN_DISK_FORMAT_RAW, KRUN_LOG_LEVEL_DEBUG, KRUN_LOG_LEVEL_OFF};
 use super::kernel::KernelInfo;
 
 /// Configuration for running a VM
@@ -142,8 +142,9 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
     // Set up terminal for raw mode
     let _terminal_guard = setup_terminal()?;
 
-    // Set log level - use WARN normally, but in quiet mode we're already filtered
-    KrunContext::set_log_level(KRUN_LOG_LEVEL_WARN)
+    // Set log level - show boot sequence in verbose mode (quiet=false), suppress in quiet mode
+    let log_level = if config.quiet { KRUN_LOG_LEVEL_OFF } else { KRUN_LOG_LEVEL_DEBUG };
+    KrunContext::set_log_level(log_level)
         .map_err(|e| anyhow::anyhow!("Failed to set log level: {}", e))?;
 
     // Create context
@@ -178,15 +179,22 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
         .to_str()
         .context("Invalid kernel path")?;
 
-    let initrd_path = if config.kernel.initrd_path.exists() {
-        Some(
-            config
-                .kernel
-                .initrd_path
-                .to_str()
-                .context("Invalid initrd path")?,
-        )
+    // For libkrun-efi on macOS, we use direct kernel boot with set_kernel.
+    // The kernel, initrd and boot config are also installed on the disk as a fallback.
+
+    // Get initrd path if available
+    let initrd_str = config
+        .kernel
+        .initrd_path
+        .to_str()
+        .context("Invalid initrd path")?;
+
+    // Use initrd if it exists (needed for modular kernel drivers)
+    let initrd_path: Option<&str> = if config.kernel.initrd_path.exists() {
+        debug!("Using initrd: {:?}", config.kernel.initrd_path);
+        Some(initrd_str)
     } else {
+        debug!("No initrd - booting directly to root filesystem");
         None
     };
 
@@ -194,6 +202,7 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
     let kernel_format = detect_kernel_format(&config.kernel.kernel_path)?;
     debug!("Detected kernel format: {}", kernel_format);
 
+    // Set kernel for direct boot
     ctx.set_kernel(kernel_path, kernel_format, initrd_path, &config.kernel.cmdline)
         .map_err(|e| anyhow::anyhow!("Failed to set kernel: {}", e))?;
 
@@ -213,16 +222,18 @@ fn detect_kernel_format(kernel_path: &Path) -> Result<u32> {
     let mut file = File::open(kernel_path)
         .context("Failed to open kernel file")?;
 
-    let mut magic = [0u8; 4];
+    let mut magic = [0u8; 32];
     file.read_exact(&mut magic)
         .context("Failed to read kernel magic")?;
 
     // Check for various kernel formats
     // PE format (ARM64 EFI stub): MZ magic
     if &magic[0..2] == b"MZ" {
-        // Could be PE_GZ or uncompressed PE
-        // Check for gzip signature after PE header
-        return Ok(KRUN_KERNEL_FORMAT_RAW);  // Try RAW first
+        // ARM64 Linux kernels use PE format with EFI stub
+        // The EFI stub handles decompression internally, so we pass it as RAW
+        // and let libkrun load it as a PE executable
+        debug!("PE/EFI kernel - using RAW format (EFI stub handles decompression)");
+        return Ok(KRUN_KERNEL_FORMAT_RAW);
     }
 
     // ELF format
@@ -230,7 +241,7 @@ fn detect_kernel_format(kernel_path: &Path) -> Result<u32> {
         return Ok(KRUN_KERNEL_FORMAT_ELF);
     }
 
-    // Gzip compressed
+    // Gzip compressed (raw, not PE-wrapped)
     if &magic[0..2] == &[0x1f, 0x8b] {
         return Ok(KRUN_KERNEL_FORMAT_IMAGE_GZ);
     }
@@ -240,7 +251,7 @@ fn detect_kernel_format(kernel_path: &Path) -> Result<u32> {
         return Ok(KRUN_KERNEL_FORMAT_IMAGE_BZ2);
     }
 
-    // Zstd compressed
+    // Zstd compressed (raw, not PE-wrapped)
     if &magic[0..4] == &[0x28, 0xb5, 0x2f, 0xfd] {
         return Ok(KRUN_KERNEL_FORMAT_IMAGE_ZSTD);
     }

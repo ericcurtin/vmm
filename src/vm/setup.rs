@@ -48,6 +48,8 @@ impl HostUserInfo {
 }
 
 /// Detect the distribution type from the rootfs
+///
+/// Only systemd-based distros are supported (Ubuntu, Fedora, Debian, etc.)
 pub fn detect_distro(rootfs: &Path) -> Result<String> {
     // Check /etc/os-release
     let os_release = rootfs.join("etc/os-release");
@@ -61,24 +63,19 @@ pub fn detect_distro(rootfs: &Path) -> Result<String> {
             return Ok("fedora".to_string());
         }
         if content.contains("Debian") || content.contains("debian") {
-            return Ok("ubuntu".to_string()); // Debian-like
-        }
-        if content.contains("Alpine") || content.contains("alpine") {
-            return Ok("alpine".to_string());
+            return Ok("ubuntu".to_string()); // Debian-like, uses same setup
         }
     }
 
-    // Check for package managers
+    // Check for package managers (systemd distros only)
     if rootfs.join("usr/bin/apt").exists() || rootfs.join("usr/bin/apt-get").exists() {
         return Ok("ubuntu".to_string());
     }
     if rootfs.join("usr/bin/dnf").exists() || rootfs.join("usr/bin/yum").exists() {
         return Ok("fedora".to_string());
     }
-    if rootfs.join("sbin/apk").exists() {
-        return Ok("alpine".to_string());
-    }
 
+    // Default to generic (will require systemd)
     Ok("generic".to_string())
 }
 
@@ -241,6 +238,51 @@ fn setup_host_user(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
     // but it sets up the structure. The virtiofs mount will handle actual ownership.
     let _ = std::fs::set_permissions(&user_home, std::fs::Permissions::from_mode(0o755));
 
+    // Set up passwordless sudo for the user
+    setup_passwordless_sudo(rootfs, user)?;
+
+    Ok(())
+}
+
+/// Configure passwordless sudo for the user
+fn setup_passwordless_sudo(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
+    // Ensure sudoers.d directory exists
+    let sudoers_d = rootfs.join("etc/sudoers.d");
+    std::fs::create_dir_all(&sudoers_d)?;
+
+    // Create a sudoers file for the user with NOPASSWD
+    let sudoers_file = sudoers_d.join(&user.username);
+    let sudoers_content = format!("{} ALL=(ALL) NOPASSWD: ALL\n", user.username);
+    std::fs::write(&sudoers_file, &sudoers_content)?;
+
+    // Set correct permissions (sudoers files must be 0440)
+    std::fs::set_permissions(&sudoers_file, std::fs::Permissions::from_mode(0o440))?;
+
+    // Also add user to wheel/sudo group in /etc/group
+    let group_path = rootfs.join("etc/group");
+    if group_path.exists() {
+        let mut content = std::fs::read_to_string(&group_path)?;
+
+        // Add user to wheel group if it exists
+        if content.contains("wheel:") {
+            content = content.replace(
+                "wheel:x:10:",
+                &format!("wheel:x:10:{}", user.username)
+            );
+        }
+
+        // Add user to sudo group if it exists (Debian/Ubuntu)
+        if content.contains("sudo:") && !content.contains(&format!("sudo:x:27:{}", user.username)) {
+            content = content.replace(
+                "sudo:x:27:",
+                &format!("sudo:x:27:{}", user.username)
+            );
+        }
+
+        std::fs::write(&group_path, content)?;
+    }
+
+    debug!("Configured passwordless sudo for user {}", user.username);
     Ok(())
 }
 
@@ -254,13 +296,8 @@ fn setup_auto_login_user(rootfs: &Path, distro: &str, user: &HostUserInfo) -> Re
         let _ = std::fs::set_permissions(&shadow_path, std::fs::Permissions::from_mode(0o640));
     }
 
-    // Set up getty auto-login based on distro
-    match distro {
-        "ubuntu" | "debian" => setup_systemd_autologin_user(rootfs, user)?,
-        "fedora" => setup_systemd_autologin_user(rootfs, user)?,
-        "alpine" => setup_alpine_autologin_user(rootfs, user)?,
-        _ => {}, // Generic init handles this differently
-    }
+    // Set up systemd getty auto-login (all supported distros use systemd)
+    setup_systemd_autologin_user(rootfs, user)?;
 
     Ok(())
 }
@@ -315,60 +352,59 @@ hvc0::respawn:/sbin/getty -n -l /bin/su - {} 115200 hvc0
 
 /// Set up init to run as the host user and mount home directory
 fn setup_init_with_user(rootfs: &Path, distro: &str, user: &HostUserInfo) -> Result<()> {
-    debug!("Setting up init for {} with user {}", distro, user.username);
+    debug!("Setting up systemd for {} with user {}", distro, user.username);
 
     // Check if systemd exists
     let has_systemd = rootfs.join("lib/systemd/systemd").exists()
         || rootfs.join("usr/lib/systemd/systemd").exists();
 
-    // Check if any init exists
-    let has_init = rootfs.join("sbin/init").exists()
-        || rootfs.join("init").exists();
+    if !has_systemd {
+        debug!("Systemd not found, it will be installed during kernel extraction");
+        // Systemd will be installed when the kernel is extracted
+        // Just set up the configuration directories
+    }
 
-    if has_systemd {
-        // For systemd, create a mount unit for the home directory
-        setup_systemd_home_mount(rootfs, user)?;
+    // For systemd, create a mount unit for the home directory
+    setup_systemd_home_mount(rootfs, user)?;
 
-        // Ensure systemd is the init
-        let init_link = rootfs.join("sbin/init");
-        if !init_link.exists() {
-            std::fs::create_dir_all(rootfs.join("sbin"))?;
+    // Ensure systemd is the init - create symlink only if missing
+    let init_link = rootfs.join("sbin/init");
+    if !init_link.exists() {
+        std::fs::create_dir_all(rootfs.join("sbin"))?;
+        // Try both common paths for systemd
+        if rootfs.join("lib/systemd/systemd").exists() {
             let _ = std::os::unix::fs::symlink("/lib/systemd/systemd", &init_link);
+        } else {
+            let _ = std::os::unix::fs::symlink("/usr/lib/systemd/systemd", &init_link);
         }
+    }
 
-        // Disable unnecessary services for faster boot
-        let mask_services = [
-            "systemd-networkd-wait-online.service",
-            "NetworkManager-wait-online.service",
-            "apt-daily.service",
-            "apt-daily-upgrade.service",
-            "unattended-upgrades.service",
-        ];
+    // Disable unnecessary services for faster boot
+    let mask_services = [
+        "systemd-networkd-wait-online.service",
+        "NetworkManager-wait-online.service",
+        "apt-daily.service",
+        "apt-daily-upgrade.service",
+        "unattended-upgrades.service",
+    ];
 
-        let mask_dir = rootfs.join("etc/systemd/system");
-        std::fs::create_dir_all(&mask_dir)?;
+    let mask_dir = rootfs.join("etc/systemd/system");
+    std::fs::create_dir_all(&mask_dir)?;
 
-        for service in mask_services {
-            let link = mask_dir.join(service);
-            if !link.exists() {
-                let _ = std::os::unix::fs::symlink("/dev/null", &link);
-            }
+    for service in mask_services {
+        let link = mask_dir.join(service);
+        if !link.exists() {
+            let _ = std::os::unix::fs::symlink("/dev/null", &link);
         }
+    }
 
-        // Set default target
-        let default_target = mask_dir.join("default.target");
-        if !default_target.exists() {
-            let _ = std::os::unix::fs::symlink(
-                "/lib/systemd/system/multi-user.target",
-                &default_target,
-            );
-        }
-    } else if !has_init {
-        // No init at all - create a minimal one that runs as the user
-        setup_minimal_init_user(rootfs, user)?;
-    } else {
-        // Has init but not systemd - modify to mount home
-        setup_minimal_init_user(rootfs, user)?;
+    // Set default target to multi-user (console)
+    let default_target = mask_dir.join("default.target");
+    if !default_target.exists() {
+        let _ = std::os::unix::fs::symlink(
+            "/lib/systemd/system/multi-user.target",
+            &default_target,
+        );
     }
 
     Ok(())
@@ -499,41 +535,14 @@ fn setup_console_user(rootfs: &Path, distro: &str, command: &[String], user: &Ho
         std::fs::create_dir_all(&user_home)?;
     }
 
-    // Set up user's bash profile
+    // Set up user's bash profile for interactive mode
     let bashrc = user_home.join(".bashrc");
     if bashrc.exists() {
         let _ = std::fs::set_permissions(&bashrc, std::fs::Permissions::from_mode(0o644));
     }
 
-    // If a command is specified, create a profile that runs the command and exits
-    if !command.is_empty() {
-        let escaped_cmd: Vec<String> = command.iter()
-            .map(|arg| shell_escape(arg))
-            .collect();
-        let cmd_str = escaped_cmd.join(" ");
-
-        let content = format!(r#"# ~/.bashrc - auto-generated for command execution
-export TERM=xterm-256color
-export HOME={home_dir}
-cd {home_dir}
-
-# Run the specified command
-{cmd}
-
-# Power off after command completes
-if command -v poweroff >/dev/null 2>&1; then
-    exec poweroff -f
-fi
-if command -v halt >/dev/null 2>&1; then
-    exec halt -f -p
-fi
-echo o > /proc/sysrq-trigger 2>/dev/null || true
-exit 0
-"#, home_dir = user.home_dir, cmd = cmd_str);
-        let _ = std::fs::write(&bashrc, content);
-    } else {
-        // Interactive mode - write normal bashrc
-        let content = format!(r#"# ~/.bashrc
+    // Interactive mode - write normal bashrc
+    let bashrc_content = format!(r#"# ~/.bashrc
 export PS1='\[\033[01;32m\]\u@vmm\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 export TERM=xterm-256color
 export HOME={home_dir}
@@ -542,7 +551,11 @@ alias ll='ls -la'
 alias grep='grep --color=auto'
 cd {home_dir}
 "#, home_dir = user.home_dir);
-        let _ = std::fs::write(&bashrc, content);
+    let _ = std::fs::write(&bashrc, bashrc_content);
+
+    // If a command is specified, create a systemd service to run it
+    if !command.is_empty() {
+        setup_systemd_command_service(rootfs, command, user)?;
     }
 
     // Create .profile
@@ -551,6 +564,71 @@ cd {home_dir}
         let _ = std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o644));
     }
     let _ = std::fs::write(&profile, "# .profile\n");
+
+    Ok(())
+}
+
+/// Create a systemd service to run a command and power off
+fn setup_systemd_command_service(rootfs: &Path, command: &[String], user: &HostUserInfo) -> Result<()> {
+    let system_dir = rootfs.join("etc/systemd/system");
+    std::fs::create_dir_all(&system_dir)?;
+
+    // Escape the command for shell
+    let escaped_cmd: Vec<String> = command.iter()
+        .map(|arg| shell_escape(arg))
+        .collect();
+    let cmd_str = escaped_cmd.join(" ");
+
+    // Create the service unit
+    let service_content = format!(r#"[Unit]
+Description=VMM Command Execution
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+User={username}
+Group={username}
+WorkingDirectory={home_dir}
+Environment=HOME={home_dir}
+Environment=TERM=xterm-256color
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/hvc0
+TTYReset=yes
+TTYVHangup=yes
+ExecStart=/bin/bash -c '{cmd}'
+ExecStopPost=/sbin/poweroff -f
+
+[Install]
+WantedBy=multi-user.target
+"#,
+        username = user.username,
+        home_dir = user.home_dir,
+        cmd = cmd_str.replace('\'', "'\\''"),
+    );
+
+    std::fs::write(system_dir.join("vmm-command.service"), service_content)?;
+
+    // Enable the service
+    let wants_dir = system_dir.join("multi-user.target.wants");
+    std::fs::create_dir_all(&wants_dir)?;
+    let link = wants_dir.join("vmm-command.service");
+    if !link.exists() {
+        let _ = std::os::unix::fs::symlink(
+            "/etc/systemd/system/vmm-command.service",
+            &link,
+        );
+    }
+
+    // When running a command, disable the getty auto-login
+    // so the command service takes the console
+    let getty_link = wants_dir.join("serial-getty@hvc0.service");
+    if getty_link.exists() || getty_link.is_symlink() {
+        let _ = std::fs::remove_file(&getty_link);
+    }
 
     Ok(())
 }

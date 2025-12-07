@@ -180,9 +180,21 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
 /// Try to get a kernel with a specific page size
 async fn try_get_kernel(kernel_dir: &Path, distro: &str, page_size: PageSize) -> Result<Option<KernelInfo>> {
     let suffix = page_size.suffix();
-    let kernel_path = kernel_dir.join(format!("vmlinuz{}", suffix));
     let initrd_path = kernel_dir.join(format!("initrd{}.img", suffix));
 
+    // Prefer uncompressed Image file if it exists (better compatibility with libkrun)
+    let image_path = kernel_dir.join(format!("Image{}", suffix));
+    if image_path.exists() && initrd_path.exists() {
+        debug!("Using uncompressed Image file");
+        return Ok(Some(KernelInfo {
+            kernel_path: image_path,
+            initrd_path,
+            cmdline: get_cmdline(distro),
+        }));
+    }
+
+    // Fall back to vmlinuz (compressed PE)
+    let kernel_path = kernel_dir.join(format!("vmlinuz{}", suffix));
     if kernel_path.exists() && initrd_path.exists() {
         return Ok(Some(KernelInfo {
             kernel_path,
@@ -195,10 +207,18 @@ async fn try_get_kernel(kernel_dir: &Path, distro: &str, page_size: PageSize) ->
 }
 
 fn get_cmdline(distro: &str) -> String {
+    // Base cmdline with options for boot:
+    // - console=hvc0: virtio-console (primary console for libkrun)
+    // - root=/dev/vda: root filesystem on virtio disk
+    // - rootfstype=ext4: specify filesystem type explicitly
+    // - rw: mount root read-write
+    // - panic=0: don't reboot on panic (helps debugging)
+    // - rd.shell=0 rd.emergency=reboot: don't drop to dracut emergency shell (Fedora)
+    // Note: We don't specify init= so systemd boots naturally
     match distro {
-        "ubuntu" => "console=hvc0 root=/dev/vda rw quiet loglevel=3".to_string(),
-        "fedora" => "console=hvc0 root=/dev/vda rw quiet loglevel=3 systemd.show_status=0".to_string(),
-        _ => "console=hvc0 root=/dev/vda rw quiet".to_string(),
+        "ubuntu" => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0".to_string(),
+        "fedora" => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0 rd.shell=0 rd.emergency=reboot".to_string(),
+        _ => "console=hvc0 root=/dev/vda rootfstype=ext4 rw panic=0".to_string(),
     }
 }
 
@@ -327,26 +347,65 @@ async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_si
     // Create a Dockerfile that installs the kernel and copies it to a known location
     // Uses the user's specified image as the base
     let dockerfile = match distro {
-        "ubuntu" | "debian" => format!(r#"
+        "ubuntu" | "debian" => {
+            // On macOS/Apple Silicon, we need 16k page kernels
+            // Ubuntu provides linux-image-generic-64k-hwe for ARM64 which has 64k pages
+            // but we can also use linux-image-generic which on ARM64 is typically 4k
+            // For now, install generic and hope for the best
+            // Also install systemd for init
+            format!(r#"
 FROM {}
-RUN apt-get update && apt-get install -y linux-image-generic && \
+RUN apt-get update && apt-get install -y linux-image-generic systemd && \
     cp /boot/vmlinuz-* /vmlinuz && \
     cp /boot/initrd.img-* /initrd.img
-"#, image),
-        "fedora" => format!(r#"
+"#, image)
+        },
+        "fedora" => {
+            // On macOS/Apple Silicon (16K pages), we need a 16K page kernel
+            // Standard Fedora only has 4K kernels - 16K kernels come from Fedora Asahi COPR
+            // Use --setopt=install_weak_deps=False to skip firmware and speed up install
+            // Also extract the uncompressed Image from the PE kernel for libkrun compatibility
+            if page_size == PageSize::Page16k {
+                // For 16K page kernel, we need to enable Fedora Asahi COPR repo
+                // Include virtio and base dracut modules for proper VM boot
+                format!(r#"
 FROM {}
-RUN dnf install -y kernel-core dracut && \
+RUN dnf install -y 'dnf-command(copr)' && \
+    dnf copr enable -y @asahi/kernel && \
+    dnf install -y --setopt=install_weak_deps=False kernel-16k-core dracut systemd zstd && \
     cp /lib/modules/*/vmlinuz /vmlinuz && \
     KVER=$(ls /lib/modules/) && \
-    dracut --no-hostonly --add "bash shutdown" --force /initrd.img $KVER
-"#, image),
-        "alpine" => format!(r#"
+    dracut --no-hostonly --add "base bash shutdown" \
+           --add-drivers "virtio_console virtio_blk virtio_net" \
+           --force /initrd.img $KVER && \
+    # Extract uncompressed Image from PE kernel for libkrun compatibility \
+    # Find zstd magic (28 b5 2f fd) offset and decompress \
+    OFFSET=$(od -A d -t x1 /vmlinuz | grep -m1 "28 b5 2f fd" | awk '{{print $1}}') && \
+    if [ -n "$OFFSET" ]; then \
+        dd if=/vmlinuz bs=1 skip=$OFFSET 2>/dev/null | zstd -d > /Image 2>/dev/null || true; \
+    fi
+"#, image)
+            } else {
+                // For 4K page kernel, use standard kernel-core
+                // Include virtio and base dracut modules for proper VM boot
+                format!(r#"
 FROM {}
-RUN apk add --no-cache linux-lts && \
-    cp /boot/vmlinuz-* /vmlinuz && \
-    cp /boot/initramfs-* /initrd.img || true
-"#, image),
-        _ => return Err(anyhow::anyhow!("Unsupported distro for kernel extraction: {}", distro)),
+RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd zstd && \
+    cp /lib/modules/*/vmlinuz /vmlinuz && \
+    KVER=$(ls /lib/modules/) && \
+    dracut --no-hostonly --add "base bash shutdown" \
+           --add-drivers "virtio_console virtio_blk virtio_net" \
+           --force /initrd.img $KVER && \
+    # Extract uncompressed Image from PE kernel for libkrun compatibility \
+    # Find zstd magic (28 b5 2f fd) offset and decompress \
+    OFFSET=$(od -A d -t x1 /vmlinuz | grep -m1 "28 b5 2f fd" | awk '{{print $1}}') && \
+    if [ -n "$OFFSET" ]; then \
+        dd if=/vmlinuz bs=1 skip=$OFFSET 2>/dev/null | zstd -d > /Image 2>/dev/null || true; \
+    fi
+"#, image)
+            }
+        },
+        _ => return Err(anyhow::anyhow!("Unsupported distro for kernel extraction: {}. Only Ubuntu and Fedora are supported.", distro)),
     };
 
     // Create temp dir for build context
@@ -397,6 +456,15 @@ RUN apk add --no-cache linux-lts && \
         cp_initrd_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
     cp_initrd_cmd.status().await?;
+
+    // Also copy the uncompressed Image file if it exists (for libkrun compatibility)
+    let image_filename = format!("Image{}", suffix);
+    let _ = Command::new("docker")
+        .args(["cp", &format!("{}:/Image", container_id), dest.join(&image_filename).to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
 
     // Clean up (always suppress output)
     let _ = Command::new("docker")

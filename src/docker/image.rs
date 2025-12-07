@@ -71,18 +71,102 @@ pub async fn pull_image(image: &str) -> Result<ImageInfo> {
     })
 }
 
+/// Install systemd and essential packages into a container image
+///
+/// Container images typically don't include systemd since containers don't need init.
+/// For VMs, we need systemd to be present. This function creates a new container,
+/// installs the necessary packages, and commits it to a temporary image.
+async fn install_systemd_packages(image: &str) -> Result<String> {
+    use rand::Rng;
+
+    debug!("Installing systemd packages into image: {}", image);
+
+    // Generate a unique tag for the temporary image
+    let random_suffix: u32 = rand::rng().random();
+    let temp_image = format!("vmm-temp-{:08x}", random_suffix);
+
+    // Detect package manager and install systemd
+    // We run a container that installs systemd then commit the result
+    let install_cmd = r#"
+        if command -v dnf >/dev/null 2>&1; then
+            dnf install -y systemd systemd-libs util-linux passwd sudo
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get update && apt-get install -y systemd systemd-sysv util-linux passwd sudo
+        elif command -v apk >/dev/null 2>&1; then
+            echo "Alpine is not supported - systemd required" && exit 1
+        else
+            echo "Unknown package manager" && exit 1
+        fi
+    "#;
+
+    // Run the install command in a container
+    let output = Command::new("docker")
+        .args(["run", "--name", &temp_image, image, "sh", "-c", install_cmd])
+        .output()
+        .await
+        .context("Failed to run docker container for systemd install")?;
+
+    if !output.status.success() {
+        // Clean up container on failure
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &temp_image])
+            .output()
+            .await;
+        return Err(anyhow::anyhow!(
+            "Failed to install systemd: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    debug!("Systemd installed, committing container to image...");
+
+    // Commit the container to a new image
+    let output = Command::new("docker")
+        .args(["commit", &temp_image, &temp_image])
+        .output()
+        .await
+        .context("Failed to commit container")?;
+
+    if !output.status.success() {
+        // Clean up
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &temp_image])
+            .output()
+            .await;
+        return Err(anyhow::anyhow!(
+            "Failed to commit container: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Remove the container (keep the image)
+    let _ = Command::new("docker")
+        .args(["rm", "-f", &temp_image])
+        .output()
+        .await;
+
+    info!("Created temporary image with systemd: {}", temp_image);
+    Ok(temp_image)
+}
+
 /// Extract a Docker image to a directory using docker export
 ///
 /// This creates a container from the image and exports its filesystem.
+/// If the image doesn't have systemd (typical for container images),
+/// it will first install systemd before exporting.
 pub async fn extract_image(image: &str, dest: &Path) -> Result<()> {
     let docker = Docker::connect_with_local_defaults()
         .context("Failed to connect to Docker daemon")?;
 
     debug!("Extracting image {} to {:?}", image, dest);
 
-    // Create a temporary container
+    // First, install systemd packages into the image
+    let prepared_image = install_systemd_packages(image).await?;
+    let cleanup_image = prepared_image.clone();
+
+    // Create a temporary container from the prepared image
     let container_config = bollard::container::Config {
-        image: Some(image.to_string()),
+        image: Some(prepared_image.clone()),
         cmd: Some(vec!["/bin/true".to_string()]),
         ..Default::default()
     };
@@ -134,6 +218,12 @@ pub async fn extract_image(image: &str, dest: &Path) -> Result<()> {
         )
         .await
         .context("Failed to remove temporary container")?;
+
+    // Clean up the temporary image (with systemd installed)
+    let _ = Command::new("docker")
+        .args(["rmi", "-f", &cleanup_image])
+        .output()
+        .await;
 
     export_result?;
 
