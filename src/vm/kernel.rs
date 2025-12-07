@@ -137,12 +137,10 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
     // No cached kernel found, need to extract from container image
     debug!("Extracting kernel for {} (this may take a moment)...", distro);
 
-    // Build the image reference to use for kernel extraction
-    let image_ref = image.unwrap_or_else(|| match distro {
-        "ubuntu" => "ubuntu:latest",
-        "fedora" => "fedora:latest",
-        "centos" => "quay.io/centos/centos:stream10",
-        _ => "unknown:latest",
+    // Use the provided image or fall back to distro:latest (shortnames will resolve it)
+    let image_ref = image.unwrap_or_else(|| {
+        // Leak the string to get a &'static str - this only happens once per distro
+        Box::leak(format!("{}:latest", distro).into_boxed_str())
     });
 
     // Try to get preferred page size kernel first

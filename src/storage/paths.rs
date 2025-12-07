@@ -55,6 +55,11 @@ impl VmmPaths {
         self.vm_dir(vm_id).join("disk.raw")
     }
 
+    /// Get the vsock socket path for a specific VM
+    pub fn vm_vsock(&self, vm_id: &str) -> PathBuf {
+        self.vm_dir(vm_id).join("vsock.sock")
+    }
+
     /// Get the state file path for a specific VM
     #[allow(dead_code)]
     pub fn vm_state_file(&self, vm_id: &str) -> PathBuf {

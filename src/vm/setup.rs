@@ -125,6 +125,9 @@ pub async fn prepare_vm_rootfs_with_user(
     // Set up console for the host user
     setup_console_user(rootfs, host_user)?;
 
+    // Set up vsock shell service for multi-terminal attach
+    setup_vsock_shell_service(rootfs, host_user)?;
+
     // Set proper permissions
     fix_permissions(rootfs)?;
 
@@ -590,6 +593,91 @@ DHCP=yes
         std::fs::write(network_dir.join("80-dhcp.network"), network_conf)?;
     }
 
+    Ok(())
+}
+
+/// Set up vsock shell service for multi-terminal attach support
+///
+/// This creates a systemd service that connects to the host via vsock port 5000
+/// and spawns a shell for each connection. With libkrun, the guest initiates
+/// the connection to the host's Unix socket.
+fn setup_vsock_shell_service(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
+    debug!("Setting up vsock shell service for user {}", user.username);
+
+    // Create the vsock shell script that will connect to the host
+    let sbin_dir = rootfs.join("usr/local/sbin");
+    std::fs::create_dir_all(&sbin_dir)?;
+
+    // The script connects to vsock CID 2 (host) port 5000 and spawns a shell
+    // CID 2 is always the host in virtio-vsock
+    let script_content = format!(r#"#!/bin/bash
+# vsock-shell: Connect to host via vsock and spawn a shell
+# This runs in a loop, reconnecting when disconnected
+
+VSOCK_PORT=5000
+HOST_CID=2
+
+while true; do
+    # Check if socat is available
+    if command -v socat >/dev/null 2>&1; then
+        # Use socat to connect vsock to a PTY running bash
+        socat VSOCK-CONNECT:$HOST_CID:$VSOCK_PORT EXEC:"/bin/bash -li",pty,stderr,setsid,sigint,sane,ctty 2>/dev/null
+    else
+        # Fallback: try to use /dev/vsock directly (if available)
+        # This is less reliable but may work on some systems
+        exec 3<>/dev/vsock/$HOST_CID/$VSOCK_PORT 2>/dev/null
+        if [ $? -eq 0 ]; then
+            /bin/bash -li <&3 >&3 2>&3
+            exec 3>&-
+        fi
+    fi
+    # Wait before reconnecting
+    sleep 1
+done
+"#);
+
+    let script_path = sbin_dir.join("vsock-shell");
+    std::fs::write(&script_path, script_content)?;
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+
+    // Create a systemd service unit for the vsock shell
+    let systemd_dir = rootfs.join("etc/systemd/system");
+    std::fs::create_dir_all(&systemd_dir)?;
+
+    let service_content = format!(r#"[Unit]
+Description=VMM vsock shell service
+After=network.target
+
+[Service]
+Type=simple
+User={username}
+ExecStart=/usr/local/sbin/vsock-shell
+Restart=always
+RestartSec=1
+StandardInput=null
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
+"#, username = user.username);
+
+    let service_path = systemd_dir.join("vmm-vsock-shell.service");
+    std::fs::write(&service_path, service_content)?;
+
+    // Enable the service
+    let wants_dir = systemd_dir.join("multi-user.target.wants");
+    std::fs::create_dir_all(&wants_dir)?;
+
+    let link = wants_dir.join("vmm-vsock-shell.service");
+    if !link.exists() {
+        let _ = std::os::unix::fs::symlink(
+            "/etc/systemd/system/vmm-vsock-shell.service",
+            &link,
+        );
+    }
+
+    debug!("vsock shell service configured");
     Ok(())
 }
 

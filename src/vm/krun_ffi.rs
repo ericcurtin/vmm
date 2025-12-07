@@ -118,6 +118,23 @@ extern "C" {
     /// Starts and enters the microVM.
     /// This function only returns on error; otherwise the process exits.
     pub fn krun_start_enter(ctx_id: u32) -> i32;
+
+    /// Creates a port-path pairing for vsock communication.
+    /// Maps a vsock port in the guest to a Unix socket on the host.
+    pub fn krun_add_vsock_port(
+        ctx_id: u32,
+        port: u32,
+        filepath: *const c_char,
+    ) -> i32;
+
+    /// Extended version of krun_add_vsock_port with listen flag.
+    /// If listen is true, the host listens on the socket; otherwise the guest listens.
+    pub fn krun_add_vsock_port2(
+        ctx_id: u32,
+        port: u32,
+        filepath: *const c_char,
+        listen: bool,
+    ) -> i32;
 }
 
 /// Safe wrapper around libkrun functions
@@ -379,6 +396,34 @@ impl KrunContext {
                 Err(ret)
             } else {
                 Ok(ret as RawFd)
+            }
+        }
+    }
+
+    /// Add a vsock port mapping to a Unix socket
+    /// Maps a vsock port in the guest to a Unix socket path on the host
+    pub fn add_vsock_port(&self, port: u32, filepath: &str) -> Result<(), i32> {
+        let c_filepath = CString::new(filepath).map_err(|_| -libc::EINVAL)?;
+        unsafe {
+            let ret = krun_add_vsock_port(self.ctx_id, port, c_filepath.as_ptr());
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Add a vsock port mapping with listen flag
+    /// If listen is true, the host side will listen on the socket
+    pub fn add_vsock_port2(&self, port: u32, filepath: &str, listen: bool) -> Result<(), i32> {
+        let c_filepath = CString::new(filepath).map_err(|_| -libc::EINVAL)?;
+        unsafe {
+            let ret = krun_add_vsock_port2(self.ctx_id, port, c_filepath.as_ptr(), listen);
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
             }
         }
     }

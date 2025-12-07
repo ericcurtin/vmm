@@ -13,6 +13,9 @@ use tracing::{debug, info};
 use super::krun_ffi::{KrunContext, KRUN_DISK_FORMAT_RAW, KRUN_LOG_LEVEL_DEBUG, KRUN_LOG_LEVEL_OFF};
 use super::kernel::KernelInfo;
 
+/// Vsock port for shell access
+pub const VSOCK_SHELL_PORT: u32 = 5000;
+
 /// Configuration for running a VM
 pub struct VmConfig {
     pub vcpus: u8,
@@ -23,6 +26,8 @@ pub struct VmConfig {
     pub quiet: bool,
     /// Host home directory to share with the VM
     pub host_home: Option<String>,
+    /// Path to Unix socket for vsock shell access
+    pub vsock_path: Option<String>,
 }
 
 impl Default for VmConfig {
@@ -38,6 +43,7 @@ impl Default for VmConfig {
             },
             quiet: false,
             host_home: None,
+            vsock_path: None,
         }
     }
 }
@@ -166,6 +172,16 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
         debug!("Sharing host home directory: {}", home_path);
         ctx.add_virtiofs("home", home_path)
             .map_err(|e| anyhow::anyhow!("Failed to add virtiofs share for home: {}", e))?;
+    }
+
+    // Set up vsock port for shell access if path provided
+    if let Some(ref vsock_path) = config.vsock_path {
+        debug!("Setting up vsock port {} -> {}", VSOCK_SHELL_PORT, vsock_path);
+        // Remove existing socket file if present
+        let _ = std::fs::remove_file(vsock_path);
+        // listen=true means the host creates the socket and the guest connects to it
+        ctx.add_vsock_port2(VSOCK_SHELL_PORT, vsock_path, true)
+            .map_err(|e| anyhow::anyhow!("Failed to add vsock port: {}", e))?;
     }
 
     // Set kernel and initrd for direct boot

@@ -63,10 +63,7 @@ pub enum Commands {
     },
 
     /// List all VMs
-    #[command(visible_alias = "ps")]
-    Images,
-
-    /// List all VMs (alias for images)
+    #[command(visible_aliases = ["ps", "list", "images"])]
     Ls,
 
     /// Stop a running VM

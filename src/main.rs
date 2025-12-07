@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
             let memory = memory.unwrap_or_else(default_memory_mib);
             cmd_run(&paths, &image, cpus, memory, name, quiet).await
         }
-        Commands::Images | Commands::Ls => {
+        Commands::Ls => {
             cmd_list(&paths).await
         }
         Commands::Stop { vm } => {
@@ -92,10 +92,19 @@ async fn cmd_run(
     let resolved_image = resolve_shortname(image);
     let image = resolved_image.as_str();
 
-    // Check if there's an existing stopped VM for this image that we can reuse
+    // Check if there's an existing VM for this image that we can reuse
     let mut store = VmStore::load(paths)?;
     store.refresh_status();
 
+    // Check if there's a running VM for this image - attach to it instead
+    if let Some(running_vm) = store.find_running_by_image(image) {
+        eprintln!("Found running VM '{}' for image '{}', attaching...", running_vm.name, image);
+        let vm_id = running_vm.id.clone();
+        drop(store); // Release the store before calling cmd_attach
+        return cmd_attach(paths, &vm_id).await;
+    }
+
+    // Check if there's a stopped VM we can restart
     if let Some(existing_vm) = store.find_by_image(image) {
         // Reuse existing VM
         let vm_id = existing_vm.id.clone();
@@ -124,6 +133,7 @@ async fn cmd_run(
             let host_user = HostUserInfo::current()?;
 
             // Run the VM
+            let vsock_path = paths.vm_vsock(&vm_id);
             let config = vm::runner::VmConfig {
                 vcpus: cpus,
                 ram_mib: memory,
@@ -131,6 +141,7 @@ async fn cmd_run(
                 kernel,
                 quiet,
                 host_home: Some(host_user.home_dir.clone()),
+                vsock_path: Some(vsock_path.to_string_lossy().to_string()),
             };
 
             run_vm(config)?;
@@ -150,10 +161,9 @@ async fn cmd_run(
     // No existing VM found, create a new one
     let vm_id = Uuid::new_v4().to_string();
     let vm_name = name.unwrap_or_else(|| {
-        // Generate a name from the image
+        // Use the base image name (e.g., "ubuntu" from "docker.io/library/ubuntu:latest")
         let base = image.split(':').next().unwrap_or(image);
-        let base = base.split('/').last().unwrap_or(base);
-        format!("{}-{}", base, &vm_id[..8])
+        base.split('/').last().unwrap_or(base).to_string()
     });
 
     // Progress output - always shown to user (eprintln goes to stderr)
@@ -223,6 +233,7 @@ async fn cmd_run(
     let host_user = HostUserInfo::current()?;
 
     // Run the VM (this doesn't return on success)
+    let vsock_path = paths.vm_vsock(&vm_id);
     let config = vm::runner::VmConfig {
         vcpus: cpus,
         ram_mib: memory,
@@ -230,6 +241,7 @@ async fn cmd_run(
         kernel,
         quiet,
         host_home: Some(host_user.home_dir.clone()),
+        vsock_path: Some(vsock_path.to_string_lossy().to_string()),
     };
 
     run_vm(config)?;
@@ -490,6 +502,7 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     // Get host user info for home directory sharing
     let host_user = HostUserInfo::current()?;
 
+    let vsock_path = paths.vm_vsock(&vm_id);
     let config = vm::runner::VmConfig {
         vcpus,
         ram_mib,
@@ -497,6 +510,7 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
         kernel,
         quiet: false,
         host_home: Some(host_user.home_dir.clone()),
+        vsock_path: Some(vsock_path.to_string_lossy().to_string()),
     };
 
     run_vm(config)?;
@@ -513,6 +527,9 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 }
 
 async fn cmd_attach(paths: &VmmPaths, vm_id: &str) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
     let store = VmStore::load(paths)?;
 
     let vm = store.get(vm_id)
@@ -522,12 +539,134 @@ async fn cmd_attach(paths: &VmmPaths, vm_id: &str) -> Result<()> {
         return Err(anyhow::anyhow!("VM '{}' is not running", vm.name));
     }
 
-    // For now, we can't attach to a running VM
-    // This would require proper PTY handling
-    println!("Attaching to running VMs is not yet supported.");
-    println!("Use 'vmm start {}' to start a stopped VM in the foreground.", vm_id);
+    // Get the vsock socket path for this VM
+    let vsock_path = paths.vm_vsock(&vm.id);
+
+    if !vsock_path.exists() {
+        return Err(anyhow::anyhow!(
+            "VM '{}' does not have a vsock socket. This VM may have been created before vsock support was added.\n\
+            Try stopping and restarting the VM, or recreate it.",
+            vm.name
+        ));
+    }
+
+    // Connect to the vsock Unix socket
+    let mut stream = UnixStream::connect(&vsock_path)
+        .context(format!("Failed to connect to VM '{}' via vsock socket", vm.name))?;
+
+    // Set the stream to non-blocking for the read side
+    stream.set_nonblocking(true)?;
+
+    // Set up terminal raw mode
+    let _terminal_guard = setup_terminal_raw()?;
+
+    println!("Attached to VM '{}'. Press Ctrl+D to detach.\r", vm.name);
+
+    // Create a clone for the write thread
+    let mut write_stream = stream.try_clone()?;
+
+    // Spawn a thread to handle stdin -> socket
+    let stdin_handle = std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        let mut buf = [0u8; 1024];
+
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break, // EOF (Ctrl+D)
+                Ok(n) => {
+                    // Check for Ctrl+D (0x04)
+                    if buf[..n].contains(&0x04) {
+                        break;
+                    }
+                    if write_stream.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = write_stream.flush();
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Main thread handles socket -> stdout
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    let mut buf = [0u8; 4096];
+
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                // Connection closed
+                break;
+            }
+            Ok(n) => {
+                if stdout.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+                let _ = stdout.flush();
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No data available, sleep briefly and retry
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => break,
+        }
+
+        // Check if stdin thread has finished
+        if stdin_handle.is_finished() {
+            break;
+        }
+    }
+
+    // Wait for stdin thread to finish
+    let _ = stdin_handle.join();
+
+    println!("\r\nDetached from VM '{}'.", vm.name);
 
     Ok(())
+}
+
+/// RAII guard for terminal settings (raw mode for attach)
+struct TerminalRawGuard {
+    original: Option<termios::Termios>,
+}
+
+impl Drop for TerminalRawGuard {
+    fn drop(&mut self) {
+        if let Some(ref original) = self.original {
+            let _ = termios::tcsetattr(libc::STDIN_FILENO, termios::TCSANOW, original);
+        }
+    }
+}
+
+fn setup_terminal_raw() -> Result<TerminalRawGuard> {
+    use termios::*;
+
+    // Check if stdin is a tty
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Ok(TerminalRawGuard { original: None });
+    }
+
+    // Save original settings
+    let original = Termios::from_fd(libc::STDIN_FILENO)
+        .context("Failed to get terminal settings")?;
+
+    // Set raw mode
+    let mut raw = original.clone();
+    raw.c_lflag &= !(ICANON | ECHO | ISIG | IEXTEN);
+    raw.c_iflag &= !(IXON | BRKINT | INPCK | ISTRIP | ICRNL);
+    raw.c_oflag |= OPOST | ONLCR;
+    raw.c_cflag |= CS8;
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+
+    tcsetattr(libc::STDIN_FILENO, TCSANOW, &raw)
+        .context("Failed to set terminal to raw mode")?;
+
+    Ok(TerminalRawGuard {
+        original: Some(original),
+    })
 }
 
 async fn cmd_inspect(paths: &VmmPaths, vm_id: &str) -> Result<()> {

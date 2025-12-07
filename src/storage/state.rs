@@ -113,7 +113,7 @@ impl VmStore {
         self.vms.insert(vm.id.clone(), vm);
     }
 
-    /// Get a VM by ID or name
+    /// Get a VM by ID or name (supports prefix matching)
     pub fn get(&self, id_or_name: &str) -> Option<&VmState> {
         // Try exact ID match first
         if let Some(vm) = self.vms.get(id_or_name) {
@@ -127,9 +127,16 @@ impl VmStore {
             }
         }
 
-        // Try name match
+        // Try exact name match
         for vm in self.vms.values() {
             if vm.name == id_or_name {
+                return Some(vm);
+            }
+        }
+
+        // Try name prefix match
+        for vm in self.vms.values() {
+            if vm.name.starts_with(id_or_name) {
                 return Some(vm);
             }
         }
@@ -137,16 +144,16 @@ impl VmStore {
         None
     }
 
-    /// Get a mutable VM by ID or name
+    /// Get a mutable VM by ID or name (supports prefix matching)
     pub fn get_mut(&mut self, id_or_name: &str) -> Option<&mut VmState> {
         // Try exact ID match first
         if self.vms.contains_key(id_or_name) {
             return self.vms.get_mut(id_or_name);
         }
 
-        // Find by short ID or name
+        // Find by short ID, exact name, or name prefix
         let id = self.vms.iter().find_map(|(id, vm)| {
-            if id.starts_with(id_or_name) || vm.name == id_or_name {
+            if id.starts_with(id_or_name) || vm.name == id_or_name || vm.name.starts_with(id_or_name) {
                 Some(id.clone())
             } else {
                 None
@@ -156,16 +163,16 @@ impl VmStore {
         id.and_then(|id| self.vms.get_mut(&id))
     }
 
-    /// Remove a VM from the store
+    /// Remove a VM from the store (supports prefix matching)
     pub fn remove(&mut self, id_or_name: &str) -> Option<VmState> {
         // Try exact ID match first
         if self.vms.contains_key(id_or_name) {
             return self.vms.remove(id_or_name);
         }
 
-        // Find by short ID or name
+        // Find by short ID, exact name, or name prefix
         let id = self.vms.iter().find_map(|(id, vm)| {
-            if id.starts_with(id_or_name) || vm.name == id_or_name {
+            if id.starts_with(id_or_name) || vm.name == id_or_name || vm.name.starts_with(id_or_name) {
                 Some(id.clone())
             } else {
                 None
@@ -182,8 +189,8 @@ impl VmStore {
         vms
     }
 
-    /// Find a stopped VM by image name
-    pub fn find_by_image(&self, image: &str) -> Option<&VmState> {
+    /// Check if an image matches a VM (helper for find methods)
+    fn image_matches(vm_image: &str, image: &str) -> bool {
         // Normalize image name (add :latest if no tag)
         let normalized = if image.contains(':') {
             image.to_string()
@@ -194,22 +201,28 @@ impl VmStore {
         // Also check without :latest suffix
         let base_image = image.split(':').next().unwrap_or(image);
 
+        let vm_normalized = if vm_image.contains(':') {
+            vm_image.to_string()
+        } else {
+            format!("{}:latest", vm_image)
+        };
+        let vm_base = vm_image.split(':').next().unwrap_or(vm_image);
+
+        vm_image == image || vm_image == normalized || vm_normalized == normalized
+            || vm_base == base_image
+    }
+
+    /// Find a running VM by image name
+    pub fn find_running_by_image(&self, image: &str) -> Option<&VmState> {
         self.vms.values().find(|vm| {
-            // Only match stopped VMs
-            if vm.status != VmStatus::Stopped {
-                return false;
-            }
+            vm.status == VmStatus::Running && Self::image_matches(&vm.image, image)
+        })
+    }
 
-            // Check if image matches
-            let vm_normalized = if vm.image.contains(':') {
-                vm.image.clone()
-            } else {
-                format!("{}:latest", vm.image)
-            };
-            let vm_base = vm.image.split(':').next().unwrap_or(&vm.image);
-
-            vm.image == image || vm.image == normalized || vm_normalized == normalized
-                || vm_base == base_image
+    /// Find a stopped VM by image name
+    pub fn find_by_image(&self, image: &str) -> Option<&VmState> {
+        self.vms.values().find(|vm| {
+            vm.status == VmStatus::Stopped && Self::image_matches(&vm.image, image)
         })
     }
 
