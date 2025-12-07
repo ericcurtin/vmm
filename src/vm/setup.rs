@@ -383,12 +383,14 @@ fn setup_init_with_user(rootfs: &Path, distro: &str, user: &HostUserInfo) -> Res
         }
     }
 
-    // Disable unnecessary services for faster boot
+    // Disable unnecessary services and timers for faster boot
     let mask_services = [
         "systemd-networkd-wait-online.service",
         "NetworkManager-wait-online.service",
         "apt-daily.service",
         "apt-daily-upgrade.service",
+        "apt-daily.timer",
+        "apt-daily-upgrade.timer",
         "unattended-upgrades.service",
     ];
 
@@ -429,13 +431,15 @@ fn setup_systemd_home_mount(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
     // - Wait for systemd-modules-load.service to ensure virtiofs module is available
     // - Not block boot if mount fails (nofail)
     // - Use x-systemd.device-timeout to avoid long hangs
-    // Note: Don't use ConditionPathExists as the path varies between distros
+    // - ConditionPathExists checks if virtiofs tag exists (in /sys/fs/virtiofs/)
     let mount_content = format!(r#"[Unit]
 Description=Mount host home directory
 After=systemd-modules-load.service
 After=local-fs-pre.target
 Before=local-fs.target
 DefaultDependencies=no
+# Only attempt mount if virtiofs is available
+ConditionPathExists=/sys/module/virtiofs
 
 [Mount]
 What=home

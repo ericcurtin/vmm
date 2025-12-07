@@ -23,10 +23,14 @@ vmm lets you run container images as lightweight virtual machines on macOS, prov
 ```bash
 git clone https://github.com/ecurtin/vmm.git
 cd vmm
-cargo build --release
+make release
 ```
 
+This builds and signs the binary with the required Hypervisor.framework entitlement.
+
 The binary will be at `./target/release/vmm`.
+
+> **Note**: On macOS, the binary must be signed with the `com.apple.security.hypervisor` entitlement to use the Hypervisor.framework. The Makefile handles this automatically. If you build with `cargo build` directly, run `make sign` afterwards.
 
 ## Quick Start
 
