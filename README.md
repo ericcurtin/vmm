@@ -8,14 +8,14 @@ vmm lets you run container images as lightweight virtual machines on macOS, prov
 
 - **Docker-like CLI** - Familiar commands: `run`, `stop`, `rm`, `ls`, `pull`
 - **Container image support** - Run any OCI container image as a VM
-- **Short names** - Use `fedora`, `ubuntu`, `centos` instead of full registry paths
+- **Short names** - Use `fedora`, `ubuntu`, etc. instead of full registry paths
 - **Auto-login** - VMs boot directly to a shell as your user
 - **Home directory sharing** - Your macOS home directory is mounted in the VM via virtiofs
 
 ## Requirements
 
 - macOS (Apple Silicon or Intel)
-- Docker Desktop (for pulling container images)
+- Docker (for pulling container images)
 - Rust toolchain (for building from source)
 
 ## Installation

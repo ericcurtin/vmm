@@ -3,8 +3,8 @@
 //! This module handles downloading and managing Linux kernels and initrd
 //! images for different distributions.
 //!
-//! On macOS (Apple Silicon), 16k page size kernels are preferred for better
-//! performance. On other platforms, 4k page size kernels are used.
+//! On macOS (Apple Silicon), Fedora uses 16k page size kernels (Fedora Asahi)
+//! for better performance. Other distros use standard 4k page kernels.
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -20,14 +20,15 @@ use crate::storage::VmmPaths;
 pub enum PageSize {
     /// 4k page size (default for most Linux systems)
     Page4k,
-    /// 16k page size (preferred on macOS/Apple Silicon)
+    /// 16k page size (Fedora Asahi on macOS/Apple Silicon)
     Page16k,
 }
 
 impl PageSize {
-    /// Get the preferred page size for the current platform
-    pub fn preferred() -> Self {
-        if cfg!(target_os = "macos") {
+    /// Get the preferred page size for a distro on the current platform
+    /// Only Fedora on macOS uses 16k kernels (Fedora Asahi)
+    pub fn preferred_for_distro(distro: &str) -> Self {
+        if cfg!(target_os = "macos") && distro == "fedora" {
             PageSize::Page16k
         } else {
             PageSize::Page4k
@@ -102,18 +103,19 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
     std::fs::create_dir_all(&kernel_dir)
         .context("Failed to create kernel directory")?;
 
-    // Determine preferred and fallback page sizes
-    let preferred = PageSize::preferred();
+    // Determine preferred page size for this distro
+    // Only Fedora on macOS uses 16k kernels (Fedora Asahi), all others use 4k
+    let preferred = PageSize::preferred_for_distro(distro);
     let fallback = PageSize::fallback();
 
-    // Try preferred page size first (16k on macOS, 4k elsewhere)
+    // Try preferred page size first
     if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, preferred).await? {
         let page_desc = if preferred == PageSize::Page16k { "16k" } else { "4k" };
         debug!("Using cached {} page kernel for {}", page_desc, distro);
         return Ok(kernel_info);
     }
 
-    // Try fallback page size if preferred isn't available
+    // Try fallback page size if preferred isn't available (only matters for Fedora)
     if preferred != fallback {
         if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, fallback).await? {
             debug!("Using cached 4k page kernel for {} (16k not available)", distro);
@@ -133,7 +135,7 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
         });
     }
 
-    // No cached kernel found, need to download
+    // No cached kernel found, need to extract from container image
     debug!("Extracting kernel for {} (this may take a moment)...", distro);
 
     // Build the image reference to use for kernel extraction
@@ -153,7 +155,7 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
         }
     }
 
-    // Fall back to other page size if preferred failed
+    // Fall back to other page size if preferred failed (only matters for Fedora)
     if preferred != fallback {
         debug!("16k kernel not available, trying 4k kernel...");
         if extract_kernel_from_image(distro, image_ref, &kernel_dir, fallback, verbose).await.is_ok() {

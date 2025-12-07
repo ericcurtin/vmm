@@ -53,9 +53,7 @@ pub fn detect_distro(rootfs: &Path) -> Result<String> {
         if content.contains("Ubuntu") || content.contains("ubuntu") {
             return Ok("ubuntu".to_string());
         }
-        if content.contains("Fedora") || content.contains("fedora") {
-            return Ok("fedora".to_string());
-        }
+        // CentOS/RHEL check must come BEFORE Fedora check because CentOS has ID_LIKE="rhel fedora"
         // CentOS Stream uses dnf like Fedora, treat it as centos for kernel extraction
         if content.contains("CentOS") || content.contains("centos") {
             return Ok("centos".to_string());
@@ -63,6 +61,9 @@ pub fn detect_distro(rootfs: &Path) -> Result<String> {
         // RHEL and Rocky/Alma are CentOS-compatible
         if content.contains("Red Hat Enterprise") || content.contains("Rocky") || content.contains("AlmaLinux") {
             return Ok("centos".to_string());
+        }
+        if content.contains("Fedora") || content.contains("fedora") {
+            return Ok("fedora".to_string());
         }
         if content.contains("Debian") || content.contains("debian") {
             return Ok("ubuntu".to_string()); // Debian-like, uses same setup
