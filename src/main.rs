@@ -355,32 +355,43 @@ async fn cmd_rm(paths: &VmmPaths, vm_id: &str, force: bool) -> Result<()> {
 fn remove_dir_force(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    if path.is_dir() {
+    // Get metadata without following symlinks
+    let metadata = match path.symlink_metadata() {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+
+    if metadata.is_dir() {
         // Make the directory writable so we can remove its contents
-        if let Ok(metadata) = path.metadata() {
-            let mut perms = metadata.permissions();
-            // Add write permission for owner
-            perms.set_mode(perms.mode() | 0o700);
-            let _ = std::fs::set_permissions(path, perms);
-        }
+        let mut perms = metadata.permissions();
+        perms.set_mode(perms.mode() | 0o700);
+        let _ = std::fs::set_permissions(path, perms);
 
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
             let entry_path = entry.path();
-            if entry_path.is_dir() {
+            let entry_metadata = match entry_path.symlink_metadata() {
+                Ok(m) => m,
+                Err(_) => continue, // Skip entries we can't read
+            };
+
+            if entry_metadata.is_dir() {
                 remove_dir_force(&entry_path)?;
             } else {
-                // Make file writable before removing
-                if let Ok(metadata) = entry_path.metadata() {
-                    let mut perms = metadata.permissions();
+                // Make file writable before removing (for regular files)
+                if entry_metadata.is_file() {
+                    let mut perms = entry_metadata.permissions();
                     perms.set_mode(perms.mode() | 0o600);
                     let _ = std::fs::set_permissions(&entry_path, perms);
                 }
+                // Remove file or symlink
                 std::fs::remove_file(&entry_path)?;
             }
         }
         std::fs::remove_dir(path)?;
     } else {
+        // It's a file or symlink
         std::fs::remove_file(path)?;
     }
     Ok(())

@@ -25,9 +25,6 @@ static SHORTNAMES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     // Debian
     m.insert("debian", "docker.io/library/debian");
 
-    // Alpine
-    m.insert("alpine", "docker.io/library/alpine");
-
     // Red Hat UBI (Universal Base Image)
     m.insert("ubi8", "registry.access.redhat.com/ubi8/ubi");
     m.insert("ubi9", "registry.access.redhat.com/ubi9/ubi");
