@@ -36,10 +36,28 @@ export DYLD_LIBRARY_PATH="$LIBCLANG_PATH:$DYLD_LIBRARY_PATH"
 
 # Build the EFI variant
 make clean 2>/dev/null || true
+
+# Build the init binary for aarch64 Linux using Docker
+# This is required even for EFI builds because the code includes it via include_bytes!
+echo "Building init binary for aarch64 Linux..."
+if command -v docker &> /dev/null; then
+    docker run --rm -v "$LIBKRUN_DIR/init:/init" -w /init fedora:latest \
+        bash -c "dnf install -y gcc glibc-static >/dev/null 2>&1 && gcc -O2 -static -Wall -o init init.c"
+    if [ -f "$LIBKRUN_DIR/init/init" ]; then
+        echo "Init binary built successfully"
+    else
+        echo "Error: Failed to build init binary"
+        exit 1
+    fi
+else
+    echo "Error: Docker is required to build the init binary for aarch64 Linux"
+    exit 1
+fi
+
 make EFI=1
 
-# The EFI build produces libkrun.dylib which needs to be renamed to libkrun-efi.dylib
-DYLIB="$LIBKRUN_DIR/target/release/libkrun.dylib"
+# The EFI build produces libkrun-efi.dylib (renamed by the Makefile)
+DYLIB="$LIBKRUN_DIR/target/release/libkrun-efi.dylib"
 
 if [ -f "$DYLIB" ]; then
     echo "Successfully built: $DYLIB"
@@ -47,7 +65,7 @@ if [ -f "$DYLIB" ]; then
     # Create the target directory for linking
     mkdir -p "$SCRIPT_DIR/target/libkrun"
 
-    # Copy and rename to libkrun-efi.dylib for linking
+    # Copy to target directory
     cp "$DYLIB" "$SCRIPT_DIR/target/libkrun/libkrun-efi.dylib"
 
     # Update the install name so dyld can find it at runtime

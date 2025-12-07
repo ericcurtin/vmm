@@ -11,7 +11,7 @@ mod vm;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
-use tracing::{debug, info};
+use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -102,8 +102,6 @@ async fn cmd_run(
         let vm_name = existing_vm.name.clone();
         let distro = existing_vm.distro.clone();
 
-        info!("Reusing existing VM '{}' for image '{}'", vm_name, image);
-
         // Get paths
         let disk_path = paths.vm_disk(&vm_id);
         let kernel = ensure_kernel(paths, &distro, Some(image), !quiet).await?;
@@ -111,7 +109,7 @@ async fn cmd_run(
         // Check disk exists
         if !disk_path.exists() {
             // Disk is gone, can't reuse - fall through to create new
-            info!("VM disk missing, creating new VM");
+            eprintln!("VM disk missing, creating new VM");
         } else {
             // Update state
             {
@@ -158,10 +156,11 @@ async fn cmd_run(
         format!("{}-{}", base, &vm_id[..8])
     });
 
-    info!("Creating VM '{}' from image '{}'", vm_name, image);
+    // Progress output - always shown to user (eprintln goes to stderr)
+    eprintln!("Creating VM '{}' from image '{}'", vm_name, image);
 
     // Pull the image
-    info!("Pulling image...");
+    eprintln!("Pulling image...");
     let image_info = pull_image(image).await
         .context("Failed to pull image")?;
     debug!("Image ID: {}", image_info.id);
@@ -172,32 +171,32 @@ async fn cmd_run(
 
     // Extract image to rootfs
     let rootfs = paths.vm_rootfs(&vm_id);
-    info!("Extracting image to {:?}...", rootfs);
+    eprintln!("Extracting image...");
     extract_image(image, &rootfs).await
         .context("Failed to extract image")?;
 
     // Detect distro
     let distro = vm::setup::detect_distro(&rootfs)?;
-    info!("Detected distribution: {}", distro);
+    eprintln!("Detected distribution: {}", distro);
 
     // Prepare rootfs (auto-login, init, etc.)
-    info!("Preparing VM rootfs...");
+    eprintln!("Preparing VM rootfs...");
     prepare_vm_rootfs(&rootfs, &distro).await
         .context("Failed to prepare rootfs")?;
 
     // Ensure kernel is available
-    info!("Ensuring kernel is available...");
+    eprintln!("Fetching kernel...");
     let kernel = ensure_kernel(paths, &distro, Some(image), !quiet).await
         .context("Failed to ensure kernel")?;
 
     // Create disk image from rootfs
     let disk_path = paths.vm_disk(&vm_id);
-    info!("Creating disk image...");
+    eprintln!("Creating disk image...");
     create_disk_image(&rootfs, &disk_path, None).await
         .context("Failed to create disk image")?;
 
     // Install kernel and initrd on disk
-    info!("Installing bootloader...");
+    eprintln!("Installing bootloader...");
     vm::disk::install_bootloader(&disk_path, &kernel.kernel_path, &kernel.initrd_path).await
         .context("Failed to install bootloader")?;
 
@@ -219,7 +218,7 @@ async fn cmd_run(
     store.add(vm_state);
     store.save(paths)?;
 
-    info!("Starting VM '{}' with {} vCPUs and {} MiB RAM...", vm_name, cpus, memory);
+    eprintln!("Starting VM '{}' with {} vCPUs and {} MiB RAM...", vm_name, cpus, memory);
 
     // Get host user info for home directory sharing
     let host_user = HostUserInfo::current()?;
@@ -297,7 +296,7 @@ async fn cmd_stop(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     }
 
     if let Some(pid) = vm.pid {
-        info!("Stopping VM '{}' (PID: {})...", vm.name, pid);
+        println!("Stopping VM '{}' (PID: {})...", vm.name, pid);
         unsafe {
             libc::kill(pid as i32, libc::SIGTERM);
         }
@@ -342,11 +341,48 @@ async fn cmd_rm(paths: &VmmPaths, vm_id: &str, force: bool) -> Result<()> {
     // Remove VM directory
     let vm_dir = paths.vm_dir(&full_id);
     if vm_dir.exists() {
-        std::fs::remove_dir_all(&vm_dir)
+        remove_dir_force(&vm_dir)
             .context("Failed to remove VM directory")?;
     }
 
     println!("Removed VM '{}'", vm_name);
+    Ok(())
+}
+
+/// Recursively remove a directory, fixing permissions as needed.
+/// Container rootfs extractions often have read-only directories that
+/// prevent normal removal.
+fn remove_dir_force(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if path.is_dir() {
+        // Make the directory writable so we can remove its contents
+        if let Ok(metadata) = path.metadata() {
+            let mut perms = metadata.permissions();
+            // Add write permission for owner
+            perms.set_mode(perms.mode() | 0o700);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                remove_dir_force(&entry_path)?;
+            } else {
+                // Make file writable before removing
+                if let Ok(metadata) = entry_path.metadata() {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(perms.mode() | 0o600);
+                    let _ = std::fs::set_permissions(&entry_path, perms);
+                }
+                std::fs::remove_file(&entry_path)?;
+            }
+        }
+        std::fs::remove_dir(path)?;
+    } else {
+        std::fs::remove_file(path)?;
+    }
     Ok(())
 }
 
@@ -386,8 +422,8 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     }
     store.save(paths)?;
 
-    info!("Starting VM '{}'...", vm_name);
-    println!("\n");
+    println!("Starting VM '{}'...", vm_name);
+    println!();
 
     // Get host user info for home directory sharing
     let host_user = HostUserInfo::current()?;
@@ -447,7 +483,7 @@ async fn cmd_inspect(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 async fn cmd_pull(image: &str) -> Result<()> {
     // Resolve shortnames (e.g., "centos" -> "quay.io/centos/centos")
     let resolved_image = resolve_shortname(image);
-    info!("Pulling image '{}'...", resolved_image);
+    println!("Pulling image '{}'...", resolved_image);
     let image_info = pull_image(&resolved_image).await?;
     println!("Successfully pulled {}", resolved_image);
     println!("Image ID: {}", &image_info.id[..12.min(image_info.id.len())]);
