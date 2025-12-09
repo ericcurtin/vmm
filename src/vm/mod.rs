@@ -3,9 +3,10 @@
 //! This module provides functionality to create, start, stop, and manage
 //! lightweight VMs using libkrun-efi.
 
-mod krun_ffi;
-mod kernel;
 pub mod disk;
+mod kernel;
+mod krun_ffi;
+mod network;
 pub mod runner;
 pub mod setup;
 

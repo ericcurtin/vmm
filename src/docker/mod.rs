@@ -6,5 +6,5 @@
 mod image;
 pub mod shortnames;
 
-pub use image::{pull_image, extract_image};
+pub use image::{extract_image, pull_image};
 pub use shortnames::resolve_shortname;

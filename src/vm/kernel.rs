@@ -90,17 +90,23 @@ fn get_kernel_source(distro: &str, _arch: &str) -> Option<KernelSource> {
 /// * `image` - Optional full image name with tag (e.g., "ubuntu:24.04", "fedora:43")
 ///             If not provided, uses "latest" tag
 /// * `verbose` - Whether to show verbose output (docker build progress, etc.)
-pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, verbose: bool) -> Result<KernelInfo> {
+pub async fn ensure_kernel(
+    paths: &VmmPaths,
+    distro: &str,
+    image: Option<&str>,
+    verbose: bool,
+) -> Result<KernelInfo> {
     let arch = std::env::consts::ARCH;
 
     // Extract version from image tag for kernel caching
     let version = image
         .and_then(|img| img.split(':').nth(1))
         .unwrap_or("latest");
-    let kernel_dir = paths.kernels_dir().join(format!("{}-{}-{}", distro, version, arch));
+    let kernel_dir = paths
+        .kernels_dir()
+        .join(format!("{}-{}-{}", distro, version, arch));
 
-    std::fs::create_dir_all(&kernel_dir)
-        .context("Failed to create kernel directory")?;
+    std::fs::create_dir_all(&kernel_dir).context("Failed to create kernel directory")?;
 
     // Determine preferred page size for this distro
     // Only Fedora on macOS uses 16k kernels (Fedora Asahi), all others use 4k
@@ -109,7 +115,11 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
 
     // Try preferred page size first
     if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, preferred).await? {
-        let page_desc = if preferred == PageSize::Page16k { "16k" } else { "4k" };
+        let page_desc = if preferred == PageSize::Page16k {
+            "16k"
+        } else {
+            "4k"
+        };
         debug!("Using cached {} page kernel for {}", page_desc, distro);
         return Ok(kernel_info);
     }
@@ -117,7 +127,10 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
     // Try fallback page size if preferred isn't available (only matters for Fedora)
     if preferred != fallback {
         if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, fallback).await? {
-            debug!("Using cached 4k page kernel for {} (16k not available)", distro);
+            debug!(
+                "Using cached 4k page kernel for {} (16k not available)",
+                distro
+            );
             return Ok(kernel_info);
         }
     }
@@ -135,7 +148,10 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
     }
 
     // No cached kernel found, need to extract from container image
-    debug!("Extracting kernel for {} (this may take a moment)...", distro);
+    debug!(
+        "Extracting kernel for {} (this may take a moment)...",
+        distro
+    );
 
     // Use the provided image or fall back to distro:latest (shortnames will resolve it)
     let image_ref = image.unwrap_or_else(|| {
@@ -144,9 +160,16 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
     });
 
     // Try to get preferred page size kernel first
-    if extract_kernel_from_image(distro, image_ref, &kernel_dir, preferred, verbose).await.is_ok() {
+    if extract_kernel_from_image(distro, image_ref, &kernel_dir, preferred, verbose)
+        .await
+        .is_ok()
+    {
         if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, preferred).await? {
-            let page_desc = if preferred == PageSize::Page16k { "16k" } else { "4k" };
+            let page_desc = if preferred == PageSize::Page16k {
+                "16k"
+            } else {
+                "4k"
+            };
             debug!("Using {} page kernel for {}", page_desc, distro);
             return Ok(kernel_info);
         }
@@ -155,7 +178,10 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
     // Fall back to other page size if preferred failed (only matters for Fedora)
     if preferred != fallback {
         debug!("16k kernel not available, trying 4k kernel...");
-        if extract_kernel_from_image(distro, image_ref, &kernel_dir, fallback, verbose).await.is_ok() {
+        if extract_kernel_from_image(distro, image_ref, &kernel_dir, fallback, verbose)
+            .await
+            .is_ok()
+        {
             if let Some(kernel_info) = try_get_kernel(&kernel_dir, distro, fallback).await? {
                 return Ok(kernel_info);
             }
@@ -178,7 +204,11 @@ pub async fn ensure_kernel(paths: &VmmPaths, distro: &str, image: Option<&str>, 
 }
 
 /// Try to get a kernel with a specific page size
-async fn try_get_kernel(kernel_dir: &Path, distro: &str, page_size: PageSize) -> Result<Option<KernelInfo>> {
+async fn try_get_kernel(
+    kernel_dir: &Path,
+    distro: &str,
+    page_size: PageSize,
+) -> Result<Option<KernelInfo>> {
     let suffix = page_size.suffix();
     let initrd_path = kernel_dir.join(format!("initrd{}.img", suffix));
 
@@ -224,9 +254,15 @@ fn get_cmdline(distro: &str) -> String {
 }
 
 /// Extract kernel and initrd from a Docker image
-async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_size: PageSize, verbose: bool) -> Result<()> {
-    use tokio::process::Command;
+async fn extract_kernel_from_image(
+    distro: &str,
+    image: &str,
+    dest: &Path,
+    page_size: PageSize,
+    verbose: bool,
+) -> Result<()> {
     use std::process::Stdio;
+    use tokio::process::Command;
 
     let suffix = page_size.suffix();
     let kernel_filename = format!("vmlinuz{}", suffix);
@@ -239,11 +275,14 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
     if verbose {
         pull_cmd.args(["pull", image]);
     } else {
-        pull_cmd.args(["pull", "-q", image])
+        pull_cmd
+            .args(["pull", "-q", image])
             .stdout(Stdio::null())
             .stderr(Stdio::null());
     }
-    let pull_status = pull_cmd.status().await
+    let pull_status = pull_cmd
+        .status()
+        .await
         .context("Failed to pull Docker image")?;
 
     if !pull_status.success() {
@@ -256,7 +295,9 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
     if !verbose {
         create_cmd.stderr(Stdio::null());
     }
-    let container_id = create_cmd.output().await
+    let container_id = create_cmd
+        .output()
+        .await
         .context("Failed to create container")?;
 
     if !container_id.status.success() {
@@ -270,11 +311,7 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
     debug!("Created temporary container: {}", container_id);
 
     // Try to find and copy kernel
-    let kernel_paths = [
-        "/boot/vmlinuz",
-        "/boot/vmlinuz-*",
-        "/vmlinuz",
-    ];
+    let kernel_paths = ["/boot/vmlinuz", "/boot/vmlinuz-*", "/vmlinuz"];
 
     let initrd_paths = [
         "/boot/initrd.img",
@@ -286,7 +323,11 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
     // Try each kernel path (suppress error output)
     for kpath in &kernel_paths {
         let result = Command::new("docker")
-            .args(["cp", &format!("{}:{}", container_id, kpath), dest.join(&kernel_filename).to_str().unwrap()])
+            .args([
+                "cp",
+                &format!("{}:{}", container_id, kpath),
+                dest.join(&kernel_filename).to_str().unwrap(),
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -301,7 +342,11 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
     // Try each initrd path (suppress error output)
     for ipath in &initrd_paths {
         let result = Command::new("docker")
-            .args(["cp", &format!("{}:{}", container_id, ipath), dest.join(&initrd_filename).to_str().unwrap()])
+            .args([
+                "cp",
+                &format!("{}:{}", container_id, ipath),
+                dest.join(&initrd_filename).to_str().unwrap(),
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -335,9 +380,15 @@ async fn extract_kernel_from_image(distro: &str, image: &str, dest: &Path, page_
 ///
 /// This builds a kernel from the same container image the user specified,
 /// ensuring version compatibility.
-async fn build_kernel_from_image(distro: &str, image: &str, dest: &Path, page_size: PageSize, verbose: bool) -> Result<()> {
-    use tokio::process::Command;
+async fn build_kernel_from_image(
+    distro: &str,
+    image: &str,
+    dest: &Path,
+    page_size: PageSize,
+    verbose: bool,
+) -> Result<()> {
     use std::process::Stdio;
+    use tokio::process::Command;
 
     let suffix = page_size.suffix();
     let kernel_filename = format!("vmlinuz{}", suffix);
@@ -460,13 +511,27 @@ RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd z
     let image_name = format!("vmm-kernel-{}", distro);
     let mut build_cmd = Command::new("docker");
     if verbose {
-        build_cmd.args(["build", "-t", &image_name, temp_dir.path().to_str().unwrap()]);
+        build_cmd.args([
+            "build",
+            "-t",
+            &image_name,
+            temp_dir.path().to_str().unwrap(),
+        ]);
     } else {
-        build_cmd.args(["build", "-q", "-t", &image_name, temp_dir.path().to_str().unwrap()])
+        build_cmd
+            .args([
+                "build",
+                "-q",
+                "-t",
+                &image_name,
+                temp_dir.path().to_str().unwrap(),
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null());
     }
-    let build_status = build_cmd.status().await
+    let build_status = build_cmd
+        .status()
+        .await
         .context("Failed to build kernel image")?;
 
     if !build_status.success() {
@@ -487,14 +552,22 @@ RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd z
 
     // Copy kernel and initrd (using /out-* paths for debian/ubuntu to avoid symlink issues)
     let mut cp_kernel_cmd = Command::new("docker");
-    cp_kernel_cmd.args(["cp", &format!("{}:/out-vmlinuz", container_id), dest.join(&kernel_filename).to_str().unwrap()]);
+    cp_kernel_cmd.args([
+        "cp",
+        &format!("{}:/out-vmlinuz", container_id),
+        dest.join(&kernel_filename).to_str().unwrap(),
+    ]);
     if !verbose {
         cp_kernel_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
     cp_kernel_cmd.status().await?;
 
     let mut cp_initrd_cmd = Command::new("docker");
-    cp_initrd_cmd.args(["cp", &format!("{}:/out-initrd.img", container_id), dest.join(&initrd_filename).to_str().unwrap()]);
+    cp_initrd_cmd.args([
+        "cp",
+        &format!("{}:/out-initrd.img", container_id),
+        dest.join(&initrd_filename).to_str().unwrap(),
+    ]);
     if !verbose {
         cp_initrd_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
@@ -503,7 +576,11 @@ RUN dnf install -y --setopt=install_weak_deps=False kernel-core dracut systemd z
     // Also copy the uncompressed Image file if it exists (for libkrun compatibility)
     let image_filename = format!("Image{}", suffix);
     let _ = Command::new("docker")
-        .args(["cp", &format!("{}:/out-Image", container_id), dest.join(&image_filename).to_str().unwrap()])
+        .args([
+            "cp",
+            &format!("{}:/out-Image", container_id),
+            dest.join(&image_filename).to_str().unwrap(),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

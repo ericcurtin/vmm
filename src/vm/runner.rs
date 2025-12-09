@@ -10,8 +10,11 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use tracing::{debug, info};
 
-use super::krun_ffi::{KrunContext, KRUN_DISK_FORMAT_RAW, KRUN_LOG_LEVEL_DEBUG, KRUN_LOG_LEVEL_OFF};
 use super::kernel::KernelInfo;
+use super::krun_ffi::{
+    KrunContext, KRUN_DISK_FORMAT_RAW, KRUN_LOG_LEVEL_DEBUG, KRUN_LOG_LEVEL_OFF,
+};
+use super::network::GvProxy;
 
 /// Vsock port for shell access
 pub const VSOCK_SHELL_PORT: u32 = 5000;
@@ -28,6 +31,10 @@ pub struct VmConfig {
     pub host_home: Option<String>,
     /// Path to Unix socket for vsock shell access
     pub vsock_path: Option<String>,
+    /// Path to gvproxy socket for network access
+    pub gvproxy_socket: Option<String>,
+    /// Path to bin directory for helper binaries (gvproxy)
+    pub bin_dir: Option<String>,
 }
 
 impl Default for VmConfig {
@@ -44,6 +51,8 @@ impl Default for VmConfig {
             quiet: false,
             host_home: None,
             vsock_path: None,
+            gvproxy_socket: None,
+            bin_dir: None,
         }
     }
 }
@@ -87,7 +96,9 @@ fn run_vm_quiet(config: VmConfig) -> Result<()> {
         }
         child_pid => {
             // Parent process - filters output
-            unsafe { libc::close(stderr_write); }
+            unsafe {
+                libc::close(stderr_write);
+            }
 
             // Read from pipe and filter
             let stderr_file = unsafe { std::fs::File::from_raw_fd(stderr_read) };
@@ -139,20 +150,27 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
 
     // Verify disk exists
     if !Path::new(&config.disk_path).exists() {
-        return Err(anyhow::anyhow!("Disk image not found: {}", config.disk_path));
+        return Err(anyhow::anyhow!(
+            "Disk image not found: {}",
+            config.disk_path
+        ));
     }
 
     // Set up terminal for raw mode
     let _terminal_guard = setup_terminal()?;
 
     // Set log level - show boot sequence in verbose mode (quiet=false), suppress in quiet mode
-    let log_level = if config.quiet { KRUN_LOG_LEVEL_OFF } else { KRUN_LOG_LEVEL_DEBUG };
+    let log_level = if config.quiet {
+        KRUN_LOG_LEVEL_OFF
+    } else {
+        KRUN_LOG_LEVEL_DEBUG
+    };
     KrunContext::set_log_level(log_level)
         .map_err(|e| anyhow::anyhow!("Failed to set log level: {}", e))?;
 
     // Create context
-    let ctx = KrunContext::new()
-        .map_err(|e| anyhow::anyhow!("Failed to create krun context: {}", e))?;
+    let ctx =
+        KrunContext::new().map_err(|e| anyhow::anyhow!("Failed to create krun context: {}", e))?;
 
     // Configure VM resources
     ctx.set_vm_config(config.vcpus, config.ram_mib)
@@ -179,7 +197,10 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
     // When guest connects to vsock port, libkrun accepts connections on Unix socket.
     // Host clients connect to Unix socket, libkrun proxies to guest's vsock.
     if let Some(ref vsock_path) = config.vsock_path {
-        debug!("Setting up vsock port {} -> {}", VSOCK_SHELL_PORT, vsock_path);
+        debug!(
+            "Setting up vsock port {} -> {}",
+            VSOCK_SHELL_PORT, vsock_path
+        );
         // Remove existing socket file if present
         let _ = std::fs::remove_file(vsock_path);
 
@@ -189,6 +210,33 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to add vsock port: {}", e))?;
         debug!("Configured vsock port mapping with libkrun-managed socket");
     }
+
+    // Set up networking via gvproxy if socket path and bin_dir provided
+    // We start gvproxy here (inside the forked child in quiet mode) to avoid
+    // the parent process killing gvproxy when it drops the handle
+    let _gvproxy: Option<GvProxy> = if let (Some(ref gvproxy_socket), Some(ref bin_dir)) =
+        (&config.gvproxy_socket, &config.bin_dir)
+    {
+        debug!("Starting gvproxy for networking");
+        let gvproxy = GvProxy::start(Path::new(gvproxy_socket), Path::new(bin_dir))
+            .context("Failed to start gvproxy for networking")?;
+
+        debug!(
+            "Configuring virtio-net with gvproxy socket: {}",
+            gvproxy_socket
+        );
+        ctx.set_gvproxy_path(gvproxy_socket).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to set gvproxy path (error {}): socket={}",
+                e,
+                gvproxy_socket
+            )
+        })?;
+        debug!("gvproxy path configured");
+        Some(gvproxy)
+    } else {
+        None
+    };
 
     // Set kernel and initrd for direct boot
     // libkrun-efi can do direct kernel boot as well as EFI boot
@@ -222,8 +270,13 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
     debug!("Detected kernel format: {}", kernel_format);
 
     // Set kernel for direct boot
-    ctx.set_kernel(kernel_path, kernel_format, initrd_path, &config.kernel.cmdline)
-        .map_err(|e| anyhow::anyhow!("Failed to set kernel: {}", e))?;
+    ctx.set_kernel(
+        kernel_path,
+        kernel_format,
+        initrd_path,
+        &config.kernel.cmdline,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to set kernel: {}", e))?;
 
     info!("Entering VM...");
 
@@ -234,12 +287,11 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
 
 /// Detect kernel format from file magic
 fn detect_kernel_format(kernel_path: &Path) -> Result<u32> {
+    use super::krun_ffi::*;
     use std::fs::File;
     use std::io::Read;
-    use super::krun_ffi::*;
 
-    let mut file = File::open(kernel_path)
-        .context("Failed to open kernel file")?;
+    let mut file = File::open(kernel_path).context("Failed to open kernel file")?;
 
     let mut magic = [0u8; 32];
     file.read_exact(&mut magic)

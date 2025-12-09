@@ -35,6 +35,11 @@ impl VmmPaths {
         self.base_dir.join("kernels")
     }
 
+    /// Get the bin directory for helper binaries (gvproxy, etc.)
+    pub fn bin_dir(&self) -> PathBuf {
+        self.base_dir.join("bin")
+    }
+
     /// Get the images directory (extracted container images)
     pub fn images_dir(&self) -> PathBuf {
         self.base_dir.join("images")
@@ -60,6 +65,11 @@ impl VmmPaths {
         self.vm_dir(vm_id).join("vsock.sock")
     }
 
+    /// Get the gvproxy socket path for a specific VM
+    pub fn vm_gvproxy(&self, vm_id: &str) -> PathBuf {
+        self.vm_dir(vm_id).join("gvproxy.sock")
+    }
+
     /// Get the state file path for a specific VM
     #[allow(dead_code)]
     pub fn vm_state_file(&self, vm_id: &str) -> PathBuf {
@@ -74,25 +84,26 @@ impl VmmPaths {
     /// Get the kernel path for a specific distro and architecture
     #[allow(dead_code)]
     pub fn kernel_path(&self, distro: &str, arch: &str) -> PathBuf {
-        self.kernels_dir().join(format!("{}-{}", distro, arch)).join("vmlinuz")
+        self.kernels_dir()
+            .join(format!("{}-{}", distro, arch))
+            .join("vmlinuz")
     }
 
     /// Get the initrd path for a specific distro and architecture
     #[allow(dead_code)]
     pub fn initrd_path(&self, distro: &str, arch: &str) -> PathBuf {
-        self.kernels_dir().join(format!("{}-{}", distro, arch)).join("initrd.img")
+        self.kernels_dir()
+            .join(format!("{}-{}", distro, arch))
+            .join("initrd.img")
     }
 
     /// Ensure all required directories exist
     pub fn ensure_dirs(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.base_dir)
-            .context("Failed to create base directory")?;
-        std::fs::create_dir_all(self.vms_dir())
-            .context("Failed to create VMs directory")?;
+        std::fs::create_dir_all(&self.base_dir).context("Failed to create base directory")?;
+        std::fs::create_dir_all(self.vms_dir()).context("Failed to create VMs directory")?;
         std::fs::create_dir_all(self.kernels_dir())
             .context("Failed to create kernels directory")?;
-        std::fs::create_dir_all(self.images_dir())
-            .context("Failed to create images directory")?;
+        std::fs::create_dir_all(self.images_dir()).context("Failed to create images directory")?;
         Ok(())
     }
 }

@@ -15,7 +15,7 @@ use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-use cli::{Cli, Commands, default_cpus, default_memory_mib};
+use cli::{default_cpus, default_memory_mib, Cli, Commands};
 use docker::{extract_image, pull_image, resolve_shortname};
 use storage::{VmState, VmStatus, VmStore, VmmPaths};
 use vm::{create_disk_image, ensure_kernel, prepare_vm_rootfs, run_vm, HostUserInfo};
@@ -51,32 +51,23 @@ async fn main() -> Result<()> {
     paths.ensure_dirs()?;
 
     match cli.command {
-        Commands::Run { image, cpus, memory, name } => {
+        Commands::Run {
+            image,
+            cpus,
+            memory,
+            name,
+        } => {
             let cpus = cpus.unwrap_or_else(default_cpus);
             let memory = memory.unwrap_or_else(default_memory_mib);
             cmd_run(&paths, &image, cpus, memory, name, quiet).await
         }
-        Commands::Ls => {
-            cmd_list(&paths).await
-        }
-        Commands::Stop { vm } => {
-            cmd_stop(&paths, &vm).await
-        }
-        Commands::Rm { vm, force } => {
-            cmd_rm(&paths, &vm, force).await
-        }
-        Commands::Start { vm } => {
-            cmd_start(&paths, &vm).await
-        }
-        Commands::Attach { vm } => {
-            cmd_attach(&paths, &vm).await
-        }
-        Commands::Inspect { vm } => {
-            cmd_inspect(&paths, &vm).await
-        }
-        Commands::Pull { image } => {
-            cmd_pull(&image).await
-        }
+        Commands::Ls => cmd_list(&paths).await,
+        Commands::Stop { vm } => cmd_stop(&paths, &vm).await,
+        Commands::Rm { vm, force } => cmd_rm(&paths, &vm, force).await,
+        Commands::Start { vm } => cmd_start(&paths, &vm).await,
+        Commands::Attach { vm } => cmd_attach(&paths, &vm).await,
+        Commands::Inspect { vm } => cmd_inspect(&paths, &vm).await,
+        Commands::Pull { image } => cmd_pull(&image).await,
     }
 }
 
@@ -99,7 +90,10 @@ async fn cmd_run(
 
     // Check if there's a VM currently being created for this image
     if let Some(creating_vm) = store.find_creating_by_image(image) {
-        eprintln!("VM '{}' is currently being created for image '{}'.", creating_vm.name, image);
+        eprintln!(
+            "VM '{}' is currently being created for image '{}'.",
+            creating_vm.name, image
+        );
         eprintln!("Please wait for the current creation to complete.");
         return Ok(());
     }
@@ -109,7 +103,10 @@ async fn cmd_run(
         let vsock_path = paths.vm_vsock(&running_vm.id);
         if vsock_path.exists() {
             // VM is running and has vsock socket - attach to it
-            eprintln!("Found running VM '{}' for image '{}', attaching...", running_vm.name, image);
+            eprintln!(
+                "Found running VM '{}' for image '{}', attaching...",
+                running_vm.name, image
+            );
             let vm_id = running_vm.id.clone();
             drop(store); // Release the store before calling cmd_attach
             return cmd_attach(paths, &vm_id).await;
@@ -117,8 +114,14 @@ async fn cmd_run(
             // VM is running but vsock socket doesn't exist yet
             // This can happen if the guest hasn't started the vsock service
             // or if libkrun hasn't created the socket yet
-            eprintln!("VM '{}' is already running for image '{}'.", running_vm.name, image);
-            eprintln!("Use 'vmm attach {}' once the VM's vsock service is ready.", running_vm.name);
+            eprintln!(
+                "VM '{}' is already running for image '{}'.",
+                running_vm.name, image
+            );
+            eprintln!(
+                "Use 'vmm attach {}' once the VM's vsock service is ready.",
+                running_vm.name
+            );
             return Ok(());
         }
     }
@@ -153,6 +156,7 @@ async fn cmd_run(
 
             // Run the VM
             let vsock_path = paths.vm_vsock(&vm_id);
+            let gvproxy_path = paths.vm_gvproxy(&vm_id);
             let config = vm::runner::VmConfig {
                 vcpus: cpus,
                 ram_mib: memory,
@@ -161,6 +165,8 @@ async fn cmd_run(
                 quiet,
                 host_home: Some(host_user.home_dir.clone()),
                 vsock_path: Some(vsock_path.to_string_lossy().to_string()),
+                gvproxy_socket: Some(gvproxy_path.to_string_lossy().to_string()),
+                bin_dir: Some(paths.bin_dir().to_string_lossy().to_string()),
             };
 
             run_vm(config)?;
@@ -206,8 +212,7 @@ async fn cmd_run(
 
     // Pull the image
     eprintln!("Pulling image...");
-    let image_info = pull_image(image).await
-        .context("Failed to pull image")?;
+    let image_info = pull_image(image).await.context("Failed to pull image")?;
     debug!("Image ID: {}", image_info.id);
 
     // Create VM directory
@@ -217,7 +222,8 @@ async fn cmd_run(
     // Extract image to rootfs
     let rootfs = paths.vm_rootfs(&vm_id);
     eprintln!("Extracting image...");
-    extract_image(image, &rootfs).await
+    extract_image(image, &rootfs)
+        .await
         .context("Failed to extract image")?;
 
     // Detect distro
@@ -225,23 +231,27 @@ async fn cmd_run(
 
     // Prepare rootfs (auto-login, init, etc.)
     eprintln!("Preparing VM rootfs...");
-    prepare_vm_rootfs(&rootfs, &distro).await
+    prepare_vm_rootfs(&rootfs, &distro)
+        .await
         .context("Failed to prepare rootfs")?;
 
     // Ensure kernel is available
     eprintln!("Fetching kernel...");
-    let kernel = ensure_kernel(paths, &distro, Some(image), !quiet).await
+    let kernel = ensure_kernel(paths, &distro, Some(image), !quiet)
+        .await
         .context("Failed to ensure kernel")?;
 
     // Create disk image from rootfs
     let disk_path = paths.vm_disk(&vm_id);
     eprintln!("Creating disk image...");
-    create_disk_image(&rootfs, &disk_path, None).await
+    create_disk_image(&rootfs, &disk_path, None)
+        .await
         .context("Failed to create disk image")?;
 
     // Install kernel and initrd on disk
     eprintln!("Installing bootloader...");
-    vm::disk::install_bootloader(&disk_path, &kernel.kernel_path, &kernel.initrd_path).await
+    vm::disk::install_bootloader(&disk_path, &kernel.kernel_path, &kernel.initrd_path)
+        .await
         .context("Failed to install bootloader")?;
 
     // Update VM state from Creating to Running, with detected distro
@@ -253,13 +263,17 @@ async fn cmd_run(
     }
     store.save(paths)?;
 
-    eprintln!("Starting VM '{}' with {} vCPUs and {} MiB RAM...", vm_name, cpus, memory);
+    eprintln!(
+        "Starting VM '{}' with {} vCPUs and {} MiB RAM...",
+        vm_name, cpus, memory
+    );
 
     // Get host user info for home directory sharing
     let host_user = HostUserInfo::current()?;
 
     // Run the VM (this doesn't return on success)
     let vsock_path = paths.vm_vsock(&vm_id);
+    let gvproxy_path = paths.vm_gvproxy(&vm_id);
     let config = vm::runner::VmConfig {
         vcpus: cpus,
         ram_mib: memory,
@@ -268,6 +282,8 @@ async fn cmd_run(
         quiet,
         host_home: Some(host_user.home_dir.clone()),
         vsock_path: Some(vsock_path.to_string_lossy().to_string()),
+        gvproxy_socket: Some(gvproxy_path.to_string_lossy().to_string()),
+        bin_dir: Some(paths.bin_dir().to_string_lossy().to_string()),
     };
 
     run_vm(config)?;
@@ -297,8 +313,8 @@ async fn cmd_list(paths: &VmmPaths) -> Result<()> {
 
     // Print header (Docker-style) - use consistent column widths
     println!(
-        "{:<15} {:<33} {:<7} {:<6} {:<10}",
-        "NAME", "IMAGE", "STATUS", "MEMORY", "CREATED"
+        "{:<12} {:<28} {:<12} {:<12}",
+        "NAME", "IMAGE", "MEMORY", "CREATED"
     );
 
     for vm in vms {
@@ -310,10 +326,9 @@ async fn cmd_list(paths: &VmmPaths) -> Result<()> {
         };
         let created_ago = format_relative_time(vm.created_at);
         println!(
-            "{:<15} {:<33} {:<7} {:<6} {:<10}",
-            truncate(&vm.name, 15),
-            truncate(&vm.image, 33),
-            vm.status,
+            "{:<12} {:<28} {:<12} {:<12}",
+            truncate(&vm.name, 12),
+            truncate(&vm.image, 28),
             memory_str,
             created_ago
         );
@@ -376,7 +391,8 @@ fn format_relative_time(dt: chrono::DateTime<Utc>) -> String {
 async fn cmd_stop(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     let mut store = VmStore::load(paths)?;
 
-    let vm = store.get_mut(vm_id)
+    let vm = store
+        .get_mut(vm_id)
         .context(format!("VM '{}' not found", vm_id))?;
 
     if vm.status != VmStatus::Running {
@@ -401,7 +417,8 @@ async fn cmd_stop(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 async fn cmd_rm(paths: &VmmPaths, vm_id: &str, force: bool) -> Result<()> {
     let mut store = VmStore::load(paths)?;
 
-    let vm = store.get(vm_id)
+    let vm = store
+        .get(vm_id)
         .context(format!("VM '{}' not found", vm_id))?;
 
     if vm.status == VmStatus::Running && !force {
@@ -430,8 +447,7 @@ async fn cmd_rm(paths: &VmmPaths, vm_id: &str, force: bool) -> Result<()> {
     // Remove VM directory
     let vm_dir = paths.vm_dir(&full_id);
     if vm_dir.exists() {
-        remove_dir_force(&vm_dir)
-            .context("Failed to remove VM directory")?;
+        remove_dir_force(&vm_dir).context("Failed to remove VM directory")?;
     }
 
     println!("Removed VM '{}'", vm_name);
@@ -489,7 +505,8 @@ fn remove_dir_force(path: &std::path::Path) -> std::io::Result<()> {
 async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     let mut store = VmStore::load(paths)?;
 
-    let vm = store.get(vm_id)
+    let vm = store
+        .get(vm_id)
         .context(format!("VM '{}' not found", vm_id))?;
 
     if vm.status == VmStatus::Running {
@@ -510,7 +527,9 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 
     // Check disk exists
     if !disk_path.exists() {
-        return Err(anyhow::anyhow!("VM disk image not found. The VM may be corrupted."));
+        return Err(anyhow::anyhow!(
+            "VM disk image not found. The VM may be corrupted."
+        ));
     }
 
     // Update state
@@ -529,6 +548,7 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     let host_user = HostUserInfo::current()?;
 
     let vsock_path = paths.vm_vsock(&vm_id);
+    let gvproxy_path = paths.vm_gvproxy(&vm_id);
     let config = vm::runner::VmConfig {
         vcpus,
         ram_mib,
@@ -537,6 +557,8 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
         quiet: false,
         host_home: Some(host_user.home_dir.clone()),
         vsock_path: Some(vsock_path.to_string_lossy().to_string()),
+        gvproxy_socket: Some(gvproxy_path.to_string_lossy().to_string()),
+        bin_dir: Some(paths.bin_dir().to_string_lossy().to_string()),
     };
 
     run_vm(config)?;
@@ -558,7 +580,8 @@ async fn cmd_attach(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 
     let store = VmStore::load(paths)?;
 
-    let vm = store.get(vm_id)
+    let vm = store
+        .get(vm_id)
         .context(format!("VM '{}' not found", vm_id))?;
 
     if vm.status != VmStatus::Running {
@@ -577,8 +600,10 @@ async fn cmd_attach(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     }
 
     // Connect to the vsock Unix socket
-    let mut stream = UnixStream::connect(&vsock_path)
-        .context(format!("Failed to connect to VM '{}' via vsock socket", vm.name))?;
+    let mut stream = UnixStream::connect(&vsock_path).context(format!(
+        "Failed to connect to VM '{}' via vsock socket",
+        vm.name
+    ))?;
 
     // Set the stream to non-blocking for the read side
     stream.set_nonblocking(true)?;
@@ -675,8 +700,8 @@ fn setup_terminal_raw() -> Result<TerminalRawGuard> {
     }
 
     // Save original settings
-    let original = Termios::from_fd(libc::STDIN_FILENO)
-        .context("Failed to get terminal settings")?;
+    let original =
+        Termios::from_fd(libc::STDIN_FILENO).context("Failed to get terminal settings")?;
 
     // Set raw mode
     let mut raw = original.clone();
@@ -687,8 +712,7 @@ fn setup_terminal_raw() -> Result<TerminalRawGuard> {
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
 
-    tcsetattr(libc::STDIN_FILENO, TCSANOW, &raw)
-        .context("Failed to set terminal to raw mode")?;
+    tcsetattr(libc::STDIN_FILENO, TCSANOW, &raw).context("Failed to set terminal to raw mode")?;
 
     Ok(TerminalRawGuard {
         original: Some(original),
@@ -698,7 +722,8 @@ fn setup_terminal_raw() -> Result<TerminalRawGuard> {
 async fn cmd_inspect(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     let store = VmStore::load(paths)?;
 
-    let vm = store.get(vm_id)
+    let vm = store
+        .get(vm_id)
         .context(format!("VM '{}' not found", vm_id))?;
 
     let json = serde_json::to_string_pretty(vm)?;
@@ -713,7 +738,10 @@ async fn cmd_pull(image: &str) -> Result<()> {
     println!("Pulling image '{}'...", resolved_image);
     let image_info = pull_image(&resolved_image).await?;
     println!("Successfully pulled {}", resolved_image);
-    println!("Image ID: {}", &image_info.id[..12.min(image_info.id.len())]);
+    println!(
+        "Image ID: {}",
+        &image_info.id[..12.min(image_info.id.len())]
+    );
     Ok(())
 }
 

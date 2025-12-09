@@ -1,14 +1,13 @@
 //! Short name resolution for container images
 //!
-//! This module provides Podman-like short name resolution for common
+//! This module provides short name resolution for common
 //! container images. Short names like "centos" are resolved to their
 //! full registry paths like "quay.io/centos/centos".
 
-use std::collections::HashMap;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 
 /// Built-in short name mappings for common distributions
-/// These match Podman's default shortnames configuration
 static SHORTNAMES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
 
@@ -47,7 +46,10 @@ static SHORTNAMES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     // openSUSE
     m.insert("opensuse", "registry.opensuse.org/opensuse/leap");
     m.insert("opensuse-leap", "registry.opensuse.org/opensuse/leap");
-    m.insert("opensuse-tumbleweed", "registry.opensuse.org/opensuse/tumbleweed");
+    m.insert(
+        "opensuse-tumbleweed",
+        "registry.opensuse.org/opensuse/tumbleweed",
+    );
 
     m
 });
@@ -79,7 +81,8 @@ pub fn resolve_shortname(image: &str) -> String {
     let (name, tag) = if let Some(pos) = image.rfind(':') {
         // Make sure the colon is not part of a port number (e.g., registry:5000/image)
         let before_colon = &image[..pos];
-        if before_colon.contains('/') && !before_colon.split('/').last().unwrap_or("").contains('.') {
+        if before_colon.contains('/') && !before_colon.split('/').last().unwrap_or("").contains('.')
+        {
             // It's likely a tag separator
             (&image[..pos], Some(&image[pos + 1..]))
         } else if !before_colon.contains('/') {
@@ -132,7 +135,11 @@ pub fn get_base_name(image: &str) -> String {
     let without_tag = image.split(':').next().unwrap_or(image);
 
     // Get the last path component
-    without_tag.split('/').last().unwrap_or(without_tag).to_string()
+    without_tag
+        .split('/')
+        .last()
+        .unwrap_or(without_tag)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -142,9 +149,15 @@ mod tests {
     #[test]
     fn test_resolve_centos() {
         // "centos" without tag defaults to stream10
-        assert_eq!(resolve_shortname("centos"), "quay.io/centos/centos:stream10");
+        assert_eq!(
+            resolve_shortname("centos"),
+            "quay.io/centos/centos:stream10"
+        );
         // "centos:stream9" uses the explicit tag
-        assert_eq!(resolve_shortname("centos:stream9"), "quay.io/centos/centos:stream9");
+        assert_eq!(
+            resolve_shortname("centos:stream9"),
+            "quay.io/centos/centos:stream9"
+        );
     }
 
     #[test]

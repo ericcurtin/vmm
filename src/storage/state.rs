@@ -92,8 +92,8 @@ impl VmStore {
     pub fn load(paths: &VmmPaths) -> Result<Self> {
         let state_file = paths.global_state_file();
         if state_file.exists() {
-            let contents = std::fs::read_to_string(&state_file)
-                .context("Failed to read state file")?;
+            let contents =
+                std::fs::read_to_string(&state_file).context("Failed to read state file")?;
             serde_json::from_str(&contents).context("Failed to parse state file")
         } else {
             Ok(Self::default())
@@ -103,8 +103,7 @@ impl VmStore {
     /// Save the store to disk
     pub fn save(&self, paths: &VmmPaths) -> Result<()> {
         let state_file = paths.global_state_file();
-        let contents = serde_json::to_string_pretty(self)
-            .context("Failed to serialize state")?;
+        let contents = serde_json::to_string_pretty(self).context("Failed to serialize state")?;
         std::fs::write(&state_file, contents).context("Failed to write state file")
     }
 
@@ -153,7 +152,10 @@ impl VmStore {
 
         // Find by short ID, exact name, or name prefix
         let id = self.vms.iter().find_map(|(id, vm)| {
-            if id.starts_with(id_or_name) || vm.name == id_or_name || vm.name.starts_with(id_or_name) {
+            if id.starts_with(id_or_name)
+                || vm.name == id_or_name
+                || vm.name.starts_with(id_or_name)
+            {
                 Some(id.clone())
             } else {
                 None
@@ -172,7 +174,10 @@ impl VmStore {
 
         // Find by short ID, exact name, or name prefix
         let id = self.vms.iter().find_map(|(id, vm)| {
-            if id.starts_with(id_or_name) || vm.name == id_or_name || vm.name.starts_with(id_or_name) {
+            if id.starts_with(id_or_name)
+                || vm.name == id_or_name
+                || vm.name.starts_with(id_or_name)
+            {
                 Some(id.clone())
             } else {
                 None
@@ -208,29 +213,31 @@ impl VmStore {
         };
         let vm_base = vm_image.split(':').next().unwrap_or(vm_image);
 
-        vm_image == image || vm_image == normalized || vm_normalized == normalized
+        vm_image == image
+            || vm_image == normalized
+            || vm_normalized == normalized
             || vm_base == base_image
     }
 
     /// Find a running VM by image name
     pub fn find_running_by_image(&self, image: &str) -> Option<&VmState> {
-        self.vms.values().find(|vm| {
-            vm.status == VmStatus::Running && Self::image_matches(&vm.image, image)
-        })
+        self.vms
+            .values()
+            .find(|vm| vm.status == VmStatus::Running && Self::image_matches(&vm.image, image))
     }
 
     /// Find a stopped VM by image name
     pub fn find_by_image(&self, image: &str) -> Option<&VmState> {
-        self.vms.values().find(|vm| {
-            vm.status == VmStatus::Stopped && Self::image_matches(&vm.image, image)
-        })
+        self.vms
+            .values()
+            .find(|vm| vm.status == VmStatus::Stopped && Self::image_matches(&vm.image, image))
     }
 
     /// Find a VM that is currently being created for this image
     pub fn find_creating_by_image(&self, image: &str) -> Option<&VmState> {
-        self.vms.values().find(|vm| {
-            vm.status == VmStatus::Creating && Self::image_matches(&vm.image, image)
-        })
+        self.vms
+            .values()
+            .find(|vm| vm.status == VmStatus::Creating && Self::image_matches(&vm.image, image))
     }
 
     /// Update VM status based on running processes

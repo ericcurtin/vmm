@@ -19,8 +19,8 @@ pub struct ImageInfo {
 
 /// Pull a Docker image if not already present
 pub async fn pull_image(image: &str) -> Result<ImageInfo> {
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
 
     // Parse image name and tag
     let (repo, tag) = if image.contains(':') {
@@ -155,8 +155,8 @@ async fn install_systemd_packages(image: &str) -> Result<String> {
 /// If the image doesn't have systemd (typical for container images),
 /// it will first install systemd before exporting.
 pub async fn extract_image(image: &str, dest: &Path) -> Result<()> {
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
 
     debug!("Extracting image {} to {:?}", image, dest);
 
@@ -234,8 +234,8 @@ pub async fn extract_image(image: &str, dest: &Path) -> Result<()> {
 /// Get list of available Docker images
 #[allow(dead_code)]
 pub async fn list_images() -> Result<Vec<ImageInfo>> {
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
 
     let images = docker
         .list_images::<String>(None)

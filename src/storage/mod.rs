@@ -3,8 +3,8 @@
 //! This module handles persistent storage of VM metadata, disk images,
 //! and rootfs directories.
 
-mod state;
 mod paths;
+mod state;
 
-pub use state::{VmState, VmStatus, VmStore};
 pub use paths::VmmPaths;
+pub use state::{VmState, VmStatus, VmStore};

@@ -29,8 +29,7 @@ impl HostUserInfo {
             .unwrap_or_else(|_| format!("user{}", uid));
 
         // Get home directory
-        let home_dir = std::env::var("HOME")
-            .unwrap_or_else(|_| format!("/home/{}", username));
+        let home_dir = std::env::var("HOME").unwrap_or_else(|_| format!("/home/{}", username));
 
         Ok(Self {
             username,
@@ -59,7 +58,10 @@ pub fn detect_distro(rootfs: &Path) -> Result<String> {
             return Ok("centos".to_string());
         }
         // RHEL and Rocky/Alma are CentOS-compatible
-        if content.contains("Red Hat Enterprise") || content.contains("Rocky") || content.contains("AlmaLinux") {
+        if content.contains("Red Hat Enterprise")
+            || content.contains("Rocky")
+            || content.contains("AlmaLinux")
+        {
             return Ok("centos".to_string());
         }
         if content.contains("Fedora") || content.contains("fedora") {
@@ -80,8 +82,13 @@ pub fn detect_distro(rootfs: &Path) -> Result<String> {
             return Ok("centos".to_string());
         }
         if rootfs.join("etc/redhat-release").exists() {
-            let content = std::fs::read_to_string(rootfs.join("etc/redhat-release")).unwrap_or_default();
-            if content.contains("CentOS") || content.contains("Red Hat") || content.contains("Rocky") || content.contains("Alma") {
+            let content =
+                std::fs::read_to_string(rootfs.join("etc/redhat-release")).unwrap_or_default();
+            if content.contains("CentOS")
+                || content.contains("Red Hat")
+                || content.contains("Rocky")
+                || content.contains("Alma")
+            {
                 return Ok("centos".to_string());
             }
         }
@@ -137,8 +144,17 @@ pub async fn prepare_vm_rootfs_with_user(
 
 fn create_essential_dirs(rootfs: &Path) -> Result<()> {
     let dirs = [
-        "proc", "sys", "dev", "dev/pts", "run", "tmp", "var/log",
-        "etc/init.d", "etc/rc.d", "root", "home",
+        "proc",
+        "sys",
+        "dev",
+        "dev/pts",
+        "run",
+        "tmp",
+        "var/log",
+        "etc/init.d",
+        "etc/rc.d",
+        "root",
+        "home",
     ];
 
     for dir in dirs {
@@ -147,8 +163,7 @@ fn create_essential_dirs(rootfs: &Path) -> Result<()> {
         if path.exists() || path.is_symlink() {
             continue;
         }
-        std::fs::create_dir_all(&path)
-            .with_context(|| format!("Failed to create {}", dir))?;
+        std::fs::create_dir_all(&path).with_context(|| format!("Failed to create {}", dir))?;
     }
 
     // Handle var/run specially - it's often a symlink to /run
@@ -174,7 +189,10 @@ fn create_essential_dirs(rootfs: &Path) -> Result<()> {
 
 /// Create the host user in the VM with matching UID/GID
 fn setup_host_user(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
-    debug!("Creating user {} with UID {} GID {}", user.username, user.uid, user.gid);
+    debug!(
+        "Creating user {} with UID {} GID {}",
+        user.username, user.uid, user.gid
+    );
 
     // Create user's home directory (will be mount point for virtiofs)
     let user_home = rootfs.join(user.home_dir.trim_start_matches('/'));
@@ -195,7 +213,9 @@ fn setup_host_user(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
 
     // Add user's group if not exists
     let user_group_entry = format!("{}:x:{}:", user.username, user.gid);
-    if !group_content.contains(&format!("{}:", user.username)) && !group_content.contains(&format!(":{}:", user.gid)) {
+    if !group_content.contains(&format!("{}:", user.username))
+        && !group_content.contains(&format!(":{}:", user.gid))
+    {
         group_content.push_str(&format!("{}\n", user_group_entry));
     }
 
@@ -218,11 +238,7 @@ fn setup_host_user(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
     // Use /bin/bash as shell since that's what we set up in the VM
     let user_passwd_entry = format!(
         "{}:x:{}:{}:{}:{}:/bin/bash",
-        user.username,
-        user.uid,
-        user.gid,
-        user.username,
-        user.home_dir
+        user.username, user.uid, user.gid, user.username, user.home_dir
     );
     if !passwd_content.contains(&format!("{}:", user.username)) {
         passwd_content.push_str(&format!("{}\n", user_passwd_entry));
@@ -285,18 +301,12 @@ fn setup_passwordless_sudo(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
 
         // Add user to wheel group if it exists
         if content.contains("wheel:") {
-            content = content.replace(
-                "wheel:x:10:",
-                &format!("wheel:x:10:{}", user.username)
-            );
+            content = content.replace("wheel:x:10:", &format!("wheel:x:10:{}", user.username));
         }
 
         // Add user to sudo group if it exists (Debian/Ubuntu)
         if content.contains("sudo:") && !content.contains(&format!("sudo:x:27:{}", user.username)) {
-            content = content.replace(
-                "sudo:x:27:",
-                &format!("sudo:x:27:{}", user.username)
-            );
+            content = content.replace("sudo:x:27:", &format!("sudo:x:27:{}", user.username));
         }
 
         std::fs::write(&group_path, content)?;
@@ -327,10 +337,13 @@ fn setup_systemd_autologin_user(rootfs: &Path, user: &HostUserInfo) -> Result<()
     let getty_dir = rootfs.join("etc/systemd/system/serial-getty@hvc0.service.d");
     std::fs::create_dir_all(&getty_dir)?;
 
-    let override_content = format!(r#"[Service]
+    let override_content = format!(
+        r#"[Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin {} --noclear %I $TERM
-"#, user.username);
+"#,
+        user.username
+    );
 
     std::fs::write(getty_dir.join("autologin.conf"), &override_content)?;
 
@@ -342,10 +355,13 @@ ExecStart=-/sbin/agetty --autologin {} --noclear %I $TERM
     // Set up console-getty.service for Ubuntu (uses /dev/console instead of serial)
     let console_getty_dir = rootfs.join("etc/systemd/system/console-getty.service.d");
     std::fs::create_dir_all(&console_getty_dir)?;
-    let console_override = format!(r#"[Service]
+    let console_override = format!(
+        r#"[Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin {} --noclear --keep-baud console 115200,38400,9600 $TERM
-"#, user.username);
+"#,
+        user.username
+    );
     std::fs::write(console_getty_dir.join("autologin.conf"), &console_override)?;
 
     // Create symlink to enable the service
@@ -354,10 +370,8 @@ ExecStart=-/sbin/agetty --autologin {} --noclear --keep-baud console 115200,3840
 
     let service_link = wants_dir.join("serial-getty@hvc0.service");
     if !service_link.exists() {
-        let _ = std::os::unix::fs::symlink(
-            "/lib/systemd/system/serial-getty@.service",
-            &service_link,
-        );
+        let _ =
+            std::os::unix::fs::symlink("/lib/systemd/system/serial-getty@.service", &service_link);
     }
 
     Ok(())
@@ -365,7 +379,10 @@ ExecStart=-/sbin/agetty --autologin {} --noclear --keep-baud console 115200,3840
 
 /// Set up init to run as the host user and mount home directory
 fn setup_init_with_user(rootfs: &Path, distro: &str, user: &HostUserInfo) -> Result<()> {
-    debug!("Setting up systemd for {} with user {}", distro, user.username);
+    debug!(
+        "Setting up systemd for {} with user {}",
+        distro, user.username
+    );
 
     // Check if systemd exists
     let has_systemd = rootfs.join("lib/systemd/systemd").exists()
@@ -419,10 +436,8 @@ fn setup_init_with_user(rootfs: &Path, distro: &str, user: &HostUserInfo) -> Res
     // Set default target to multi-user (console)
     let default_target = mask_dir.join("default.target");
     if !default_target.exists() {
-        let _ = std::os::unix::fs::symlink(
-            "/lib/systemd/system/multi-user.target",
-            &default_target,
-        );
+        let _ =
+            std::os::unix::fs::symlink("/lib/systemd/system/multi-user.target", &default_target);
     }
 
     Ok(())
@@ -434,9 +449,7 @@ fn setup_systemd_home_mount(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
     std::fs::create_dir_all(&mount_dir)?;
 
     // Convert home path to mount unit name (e.g., /home/user -> home-user.mount)
-    let mount_unit_name = user.home_dir
-        .trim_start_matches('/')
-        .replace('/', "-");
+    let mount_unit_name = user.home_dir.trim_start_matches('/').replace('/', "-");
     let mount_unit_file = mount_dir.join(format!("{}.mount", mount_unit_name));
 
     // The mount unit should:
@@ -445,7 +458,8 @@ fn setup_systemd_home_mount(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
     // - Use x-systemd.device-timeout to avoid long hangs
     // Note: We removed ConditionPathExists as virtiofs may be built-in to kernel
     // (no /sys/module/virtiofs) but still functional
-    let mount_content = format!(r#"[Unit]
+    let mount_content = format!(
+        r#"[Unit]
 Description=Mount host home directory
 After=systemd-modules-load.service
 After=local-fs-pre.target
@@ -460,7 +474,9 @@ Options=rw,nofail,x-systemd.device-timeout=5
 
 [Install]
 WantedBy=local-fs.target
-"#, user.home_dir);
+"#,
+        user.home_dir
+    );
 
     std::fs::write(&mount_unit_file, mount_content)?;
 
@@ -487,7 +503,9 @@ WantedBy=local-fs.target
     };
 
     // Only add if not already present
-    if !fstab_content.contains("home\t") && !fstab_content.contains(&format!("\t{}\t", user.home_dir)) {
+    if !fstab_content.contains("home\t")
+        && !fstab_content.contains(&format!("\t{}\t", user.home_dir))
+    {
         fstab_content.push_str(&fstab_entry);
         std::fs::write(&fstab_path, fstab_content)?;
     }
@@ -528,7 +546,8 @@ fn setup_console_user(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
     }
 
     // Interactive mode - write normal bashrc
-    let bashrc_content = format!(r#"# ~/.bashrc
+    let bashrc_content = format!(
+        r#"# ~/.bashrc
 export PS1='\[\033[01;32m\]\u@vmm\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 export TERM=xterm-256color
 export HOME={home_dir}
@@ -536,7 +555,9 @@ alias ls='ls --color=auto'
 alias ll='ls -la'
 alias grep='grep --color=auto'
 cd {home_dir}
-"#, home_dir = user.home_dir);
+"#,
+        home_dir = user.home_dir
+    );
     let _ = std::fs::write(&bashrc, bashrc_content);
 
     // Create .profile
@@ -549,21 +570,13 @@ cd {home_dir}
     Ok(())
 }
 
-
-
-
-
-
 fn setup_networking(rootfs: &Path, distro: &str) -> Result<()> {
     debug!("Setting up networking for {}", distro);
 
     // Create /etc/hosts
     let hosts = rootfs.join("etc/hosts");
     if !hosts.exists() {
-        std::fs::write(
-            &hosts,
-            "127.0.0.1 localhost\n::1 localhost\n",
-        )?;
+        std::fs::write(&hosts, "127.0.0.1 localhost\n::1 localhost\n")?;
     }
 
     // Create /etc/hostname
@@ -610,7 +623,8 @@ fn setup_vsock_shell_service(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
 
     // The script listens on vsock port 5000 and spawns a shell for each connection
     // Using VSOCK-LISTEN since we use listen=true on the host side (libkrun creates listening socket)
-    let script_content = format!(r#"#!/bin/bash
+    let script_content = format!(
+        r#"#!/bin/bash
 # vsock-shell: Listen on vsock and spawn a shell for each connection
 # This runs in a loop, accepting new connections
 
@@ -629,7 +643,8 @@ while true; do
     # Brief wait before restarting if socat exits
     sleep 1
 done
-"#);
+"#
+    );
 
     let script_path = sbin_dir.join("vsock-shell");
     std::fs::write(&script_path, script_content)?;
@@ -639,7 +654,8 @@ done
     let systemd_dir = rootfs.join("etc/systemd/system");
     std::fs::create_dir_all(&systemd_dir)?;
 
-    let service_content = format!(r#"[Unit]
+    let service_content = format!(
+        r#"[Unit]
 Description=VMM vsock shell service
 After=network.target
 
@@ -655,7 +671,9 @@ StandardError=null
 
 [Install]
 WantedBy=multi-user.target
-"#, username = user.username);
+"#,
+        username = user.username
+    );
 
     let service_path = systemd_dir.join("vmm-vsock-shell.service");
     std::fs::write(&service_path, service_content)?;
@@ -666,10 +684,7 @@ WantedBy=multi-user.target
 
     let link = wants_dir.join("vmm-vsock-shell.service");
     if !link.exists() {
-        let _ = std::os::unix::fs::symlink(
-            "/etc/systemd/system/vmm-vsock-shell.service",
-            &link,
-        );
+        let _ = std::os::unix::fs::symlink("/etc/systemd/system/vmm-vsock-shell.service", &link);
     }
 
     debug!("vsock shell service configured");

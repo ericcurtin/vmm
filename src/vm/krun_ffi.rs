@@ -121,11 +121,7 @@ extern "C" {
 
     /// Creates a port-path pairing for vsock communication.
     /// Maps a vsock port in the guest to a Unix socket on the host.
-    pub fn krun_add_vsock_port(
-        ctx_id: u32,
-        port: u32,
-        filepath: *const c_char,
-    ) -> i32;
+    pub fn krun_add_vsock_port(ctx_id: u32, port: u32, filepath: *const c_char) -> i32;
 
     /// Extended version of krun_add_vsock_port with listen flag.
     /// If listen is true, the host listens on the socket; otherwise the guest listens.
@@ -135,6 +131,39 @@ extern "C" {
         filepath: *const c_char,
         listen: bool,
     ) -> i32;
+
+    /// Adds a virtio-net device connected to a Unix datagram socket (for gvproxy).
+    /// c_path: Path to the Unix socket
+    /// fd: File descriptor (-1 to let libkrun connect)
+    /// c_mac: Optional MAC address (6 bytes, or null for auto)
+    /// features: virtio-net feature flags (0 for defaults)
+    /// flags: Additional flags (0 for defaults)
+    pub fn krun_add_net_unixgram(
+        ctx_id: u32,
+        c_path: *const c_char,
+        fd: i32,
+        c_mac: *const u8,
+        features: u32,
+        flags: u32,
+    ) -> i32;
+
+    /// Adds a virtio-net device connected to a Unix stream socket (for passt).
+    /// c_path: Path to the Unix socket
+    /// fd: File descriptor (-1 to let libkrun connect)
+    /// c_mac: Optional MAC address (6 bytes, or null for auto)
+    /// features: virtio-net feature flags (0 for defaults)
+    /// flags: Additional flags (0 for defaults)
+    pub fn krun_add_net_unixstream(
+        ctx_id: u32,
+        c_path: *const c_char,
+        fd: i32,
+        c_mac: *const u8,
+        features: u32,
+        flags: u32,
+    ) -> i32;
+
+    /// Sets the path to gvproxy for network connectivity (deprecated, use krun_add_net_unixdgram).
+    pub fn krun_set_gvproxy_path(ctx_id: u32, c_path: *const c_char) -> i32;
 }
 
 /// Safe wrapper around libkrun functions
@@ -420,6 +449,59 @@ impl KrunContext {
         let c_filepath = CString::new(filepath).map_err(|_| -libc::EINVAL)?;
         unsafe {
             let ret = krun_add_vsock_port2(self.ctx_id, port, c_filepath.as_ptr(), listen);
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Add a virtio-net device connected to a Unix datagram socket (for gvproxy)
+    pub fn add_net_unixgram(&self, socket_path: &str) -> Result<(), i32> {
+        let c_path = CString::new(socket_path).map_err(|_| -libc::EINVAL)?;
+        unsafe {
+            let ret = krun_add_net_unixgram(
+                self.ctx_id,
+                c_path.as_ptr(),
+                -1,               // Let libkrun connect
+                std::ptr::null(), // Auto-generate MAC
+                0,                // Default features
+                0,                // Default flags
+            );
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Add a virtio-net device connected to a Unix stream socket (for passt)
+    pub fn add_net_unixstream(&self, socket_path: &str) -> Result<(), i32> {
+        let c_path = CString::new(socket_path).map_err(|_| -libc::EINVAL)?;
+        unsafe {
+            let ret = krun_add_net_unixstream(
+                self.ctx_id,
+                c_path.as_ptr(),
+                -1,               // Let libkrun connect
+                std::ptr::null(), // Auto-generate MAC
+                0,                // Default features
+                0,                // Default flags
+            );
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Set gvproxy path (deprecated but simpler interface)
+    pub fn set_gvproxy_path(&self, path: &str) -> Result<(), i32> {
+        let c_path = CString::new(path).map_err(|_| -libc::EINVAL)?;
+        unsafe {
+            let ret = krun_set_gvproxy_path(self.ctx_id, c_path.as_ptr());
             if ret < 0 {
                 Err(ret)
             } else {

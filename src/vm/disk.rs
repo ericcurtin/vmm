@@ -13,7 +13,11 @@ const DEFAULT_DISK_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 /// Create a bootable raw disk image from a rootfs directory
 ///
 /// This creates an ext4 filesystem in a raw disk image and copies the rootfs contents into it.
-pub async fn create_disk_image(rootfs: &Path, disk_path: &Path, size_bytes: Option<u64>) -> Result<()> {
+pub async fn create_disk_image(
+    rootfs: &Path,
+    disk_path: &Path,
+    size_bytes: Option<u64>,
+) -> Result<()> {
     let size = size_bytes.unwrap_or(DEFAULT_DISK_SIZE);
 
     info!("Creating disk image at {:?} ({} bytes)", disk_path, size);
@@ -39,8 +43,7 @@ fn create_sparse_file(path: &Path, size: u64) -> Result<()> {
     use std::fs::File;
     use std::os::unix::fs::FileExt;
 
-    let file = File::create(path)
-        .context("Failed to create disk file")?;
+    let file = File::create(path).context("Failed to create disk file")?;
 
     // Write a single byte at the end to make it sparse
     file.write_at(&[0], size - 1)
@@ -57,10 +60,8 @@ async fn create_disk_via_docker(rootfs: &Path, disk_path: &Path) -> Result<()> {
 
     info!("Formatting and copying rootfs using Docker...");
 
-    let rootfs_abs = fs::canonicalize(rootfs)
-        .context("Failed to get absolute path for rootfs")?;
-    let disk_abs = fs::canonicalize(disk_path)
-        .context("Failed to get absolute path for disk")?;
+    let rootfs_abs = fs::canonicalize(rootfs).context("Failed to get absolute path for rootfs")?;
+    let disk_abs = fs::canonicalize(disk_path).context("Failed to get absolute path for disk")?;
 
     // Fix permissions on execute-only files BEFORE running Docker
     // Files like sudo have ---s--x--x (execute-only, no read) which prevents
@@ -69,13 +70,18 @@ async fn create_disk_via_docker(rootfs: &Path, disk_path: &Path) -> Result<()> {
     debug!("Fixing permissions on execute-only files in rootfs...");
     let chmod_output = Command::new("find")
         .arg(&rootfs_abs)
-        .args(["-type", "f", "-perm", "+111", "!", "-perm", "+444", "-exec", "chmod", "u+r", "{}", ";"])
+        .args([
+            "-type", "f", "-perm", "+111", "!", "-perm", "+444", "-exec", "chmod", "u+r", "{}", ";",
+        ])
         .output()
         .await
         .context("Failed to run find command to fix permissions")?;
 
     if !chmod_output.status.success() {
-        debug!("find/chmod warning (non-fatal): {}", String::from_utf8_lossy(&chmod_output.stderr));
+        debug!(
+            "find/chmod warning (non-fatal): {}",
+            String::from_utf8_lossy(&chmod_output.stderr)
+        );
     }
 
     // Script to format disk and copy rootfs
@@ -124,11 +130,17 @@ losetup -d "$LOOP"
 
     let output = Command::new("docker")
         .args([
-            "run", "--rm", "--privileged",
-            "-v", &format!("{}:/rootfs", rootfs_abs.display()),
-            "-v", &format!("{}:/disk.raw", disk_abs.display()),
+            "run",
+            "--rm",
+            "--privileged",
+            "-v",
+            &format!("{}:/rootfs", rootfs_abs.display()),
+            "-v",
+            &format!("{}:/disk.raw", disk_abs.display()),
             "ubuntu:24.04",
-            "bash", "-c", script,
+            "bash",
+            "-c",
+            script,
         ])
         .output()
         .await
@@ -137,10 +149,7 @@ losetup -d "$LOOP"
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         debug!("Docker stderr: {}", stderr);
-        return Err(anyhow::anyhow!(
-            "Failed to create disk image: {}",
-            stderr
-        ));
+        return Err(anyhow::anyhow!("Failed to create disk image: {}", stderr));
     }
 
     info!("Disk image created successfully");
@@ -168,8 +177,7 @@ async fn create_disk_native(rootfs: &Path, disk_path: &Path) -> Result<()> {
     }
 
     // Mount and copy
-    let mount_dir = tempfile::tempdir()
-        .context("Failed to create temp mount directory")?;
+    let mount_dir = tempfile::tempdir().context("Failed to create temp mount directory")?;
 
     let output = Command::new("sudo")
         .args(["mount", "-o", "loop"])
@@ -214,7 +222,11 @@ async fn create_disk_native(rootfs: &Path, disk_path: &Path) -> Result<()> {
 }
 
 /// Install bootloader (kernel and initrd) on the disk image
-pub async fn install_bootloader(disk_path: &Path, kernel_path: &Path, initrd_path: &Path) -> Result<()> {
+pub async fn install_bootloader(
+    disk_path: &Path,
+    kernel_path: &Path,
+    initrd_path: &Path,
+) -> Result<()> {
     info!("Installing kernel on disk image...");
 
     #[cfg(target_os = "macos")]
@@ -237,12 +249,11 @@ async fn install_bootloader_via_docker(
 ) -> Result<()> {
     use std::fs;
 
-    let disk_abs = fs::canonicalize(disk_path)
-        .context("Failed to get absolute path for disk")?;
-    let kernel_abs = fs::canonicalize(kernel_path)
-        .context("Failed to get absolute path for kernel")?;
-    let initrd_abs = fs::canonicalize(initrd_path)
-        .context("Failed to get absolute path for initrd")?;
+    let disk_abs = fs::canonicalize(disk_path).context("Failed to get absolute path for disk")?;
+    let kernel_abs =
+        fs::canonicalize(kernel_path).context("Failed to get absolute path for kernel")?;
+    let initrd_abs =
+        fs::canonicalize(initrd_path).context("Failed to get absolute path for initrd")?;
 
     // Script to install kernel and bootloader config
     let script = r#"
@@ -290,12 +301,19 @@ losetup -d "$LOOP"
 
     let output = Command::new("docker")
         .args([
-            "run", "--rm", "--privileged",
-            "-v", &format!("{}:/disk.raw", disk_abs.display()),
-            "-v", &format!("{}:/kernel:ro", kernel_abs.display()),
-            "-v", &format!("{}:/initrd:ro", initrd_abs.display()),
+            "run",
+            "--rm",
+            "--privileged",
+            "-v",
+            &format!("{}:/disk.raw", disk_abs.display()),
+            "-v",
+            &format!("{}:/kernel:ro", kernel_abs.display()),
+            "-v",
+            &format!("{}:/initrd:ro", initrd_abs.display()),
             "ubuntu:24.04",
-            "bash", "-c", script,
+            "bash",
+            "-c",
+            script,
         ])
         .output()
         .await
@@ -304,10 +322,7 @@ losetup -d "$LOOP"
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         debug!("Docker stderr: {}", stderr);
-        return Err(anyhow::anyhow!(
-            "Failed to install bootloader: {}",
-            stderr
-        ));
+        return Err(anyhow::anyhow!("Failed to install bootloader: {}", stderr));
     }
 
     info!("Bootloader installed successfully");
@@ -321,8 +336,7 @@ async fn install_bootloader_native(
     kernel_path: &Path,
     initrd_path: &Path,
 ) -> Result<()> {
-    let mount_dir = tempfile::tempdir()
-        .context("Failed to create temp mount directory")?;
+    let mount_dir = tempfile::tempdir().context("Failed to create temp mount directory")?;
 
     // Mount disk
     let output = Command::new("sudo")
