@@ -17,7 +17,7 @@ static SHORTNAMES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("centos-stream", "quay.io/centos/centos:stream");
 
     // Fedora - official images on Quay.io
-    m.insert("fedora", "registry.fedoraproject.org/fedora");
+    m.insert("fedora", "quay.io/fedora/fedora");
 
     // Ubuntu - Docker Hub (default, so no prefix needed)
     m.insert("ubuntu", "docker.io/library/ubuntu");
@@ -149,8 +149,8 @@ mod tests {
 
     #[test]
     fn test_resolve_fedora() {
-        assert_eq!(resolve_shortname("fedora"), "registry.fedoraproject.org/fedora");
-        assert_eq!(resolve_shortname("fedora:43"), "registry.fedoraproject.org/fedora:43");
+        assert_eq!(resolve_shortname("fedora"), "quay.io/fedora/fedora");
+        assert_eq!(resolve_shortname("fedora:43"), "quay.io/fedora/fedora:43");
     }
 
     #[test]
