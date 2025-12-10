@@ -90,9 +90,19 @@ fn run_vm_quiet(config: VmConfig) -> Result<()> {
                 libc::close(stderr_write);
             }
 
-            // Run VM (doesn't return on success)
-            run_vm_inner(config)?;
-            std::process::exit(0);
+            // Run VM in a closure to ensure all destructors run before exit
+            let exit_code = (|| -> i32 {
+                match run_vm_inner(config) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("VM error: {}", e);
+                        1
+                    }
+                }
+            })();
+
+            // All destructors have run, now exit
+            std::process::exit(exit_code);
         }
         child_pid => {
             // Parent process - filters output

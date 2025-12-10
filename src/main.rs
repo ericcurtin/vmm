@@ -18,7 +18,9 @@ use uuid::Uuid;
 use cli::{default_cpus, default_memory_mib, Cli, Commands};
 use docker::{extract_image, pull_image, resolve_shortname};
 use storage::{VmState, VmStatus, VmStore, VmmPaths};
-use vm::{create_disk_image, ensure_gvproxy, ensure_kernel, prepare_vm_rootfs, run_vm, HostUserInfo};
+use vm::{
+    create_disk_image, ensure_gvproxy, ensure_kernel, prepare_vm_rootfs, run_vm, HostUserInfo,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -349,7 +351,11 @@ async fn cmd_ps(paths: &VmmPaths) -> Result<()> {
     store.refresh_status();
     store.save(paths)?;
 
-    let vms: Vec<_> = store.list().into_iter().filter(|vm| vm.status == VmStatus::Running).collect();
+    let vms: Vec<_> = store
+        .list()
+        .into_iter()
+        .filter(|vm| vm.status == VmStatus::Running)
+        .collect();
 
     if vms.is_empty() {
         println!("No running VMs. Use 'vmm run <image>' to start one.");
@@ -370,7 +376,10 @@ async fn cmd_ps(paths: &VmmPaths) -> Result<()> {
             format!("{}Mi", vm.ram_mib)
         };
         let status_str = if let Some(started_at) = vm.started_at {
-            format!("Up {}", format_relative_time(started_at).replace(" ago", ""))
+            format!(
+                "Up {}",
+                format_relative_time(started_at).replace(" ago", "")
+            )
         } else {
             "Running".to_string()
         };

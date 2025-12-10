@@ -80,6 +80,7 @@ async fn download_gvproxy_async(dest: &Path) -> Result<()> {
 pub struct GvProxy {
     process: Child,
     socket_path: PathBuf,
+    pid_file: PathBuf,
 }
 
 impl GvProxy {
@@ -91,6 +92,10 @@ impl GvProxy {
     /// Note: ensure_gvproxy() should be called first from async context
     /// to download gvproxy if needed.
     pub fn start(socket_path: &Path, bin_dir: &Path) -> Result<Self> {
+        // Clean up any orphaned gvproxy from a previous run
+        let pid_file = socket_path.with_extension("pid");
+        cleanup_orphaned_gvproxy(&pid_file);
+
         // Remove existing socket if present
         let _ = std::fs::remove_file(socket_path);
 
@@ -111,7 +116,13 @@ impl GvProxy {
             .spawn()
             .context("Failed to start gvproxy")?;
 
-        debug!("gvproxy started with PID {}", process.id());
+        let pid = process.id();
+        debug!("gvproxy started with PID {}", pid);
+
+        // Save PID to file for cleanup if process exits without running Drop
+        if let Err(e) = std::fs::write(&pid_file, pid.to_string()) {
+            debug!("Failed to write gvproxy PID file: {}", e);
+        }
 
         // Wait a moment for socket to be created
         for _ in 0..50 {
@@ -125,6 +136,7 @@ impl GvProxy {
             // Kill the process if socket wasn't created
             let mut proc = process;
             let _ = proc.kill();
+            let _ = std::fs::remove_file(&pid_file);
             return Err(anyhow::anyhow!(
                 "gvproxy failed to create socket at {:?}",
                 socket_path
@@ -134,7 +146,34 @@ impl GvProxy {
         Ok(Self {
             process,
             socket_path: socket_path.to_path_buf(),
+            pid_file,
         })
+    }
+}
+
+/// Clean up an orphaned gvproxy process from a previous run
+fn cleanup_orphaned_gvproxy(pid_file: &Path) {
+    if let Ok(pid_str) = std::fs::read_to_string(pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            // Check if process is still running
+            let is_running = unsafe { libc::kill(pid, 0) == 0 };
+            if is_running {
+                debug!("Killing orphaned gvproxy process (PID {})", pid);
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+                // Give it a moment to exit gracefully
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                // Force kill if still running
+                let still_running = unsafe { libc::kill(pid, 0) == 0 };
+                if still_running {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(pid_file);
     }
 }
 
@@ -144,6 +183,7 @@ impl Drop for GvProxy {
         let _ = self.process.kill();
         let _ = self.process.wait();
         let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(&self.pid_file);
     }
 }
 

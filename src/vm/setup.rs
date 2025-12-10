@@ -585,25 +585,47 @@ fn setup_networking(rootfs: &Path, distro: &str) -> Result<()> {
         std::fs::write(&hostname, "vmm\n")?;
     }
 
-    // Create /etc/resolv.conf
+    // Create /etc/resolv.conf - use gvproxy's DNS (192.168.127.1) as primary
     let resolv = rootfs.join("etc/resolv.conf");
-    if !resolv.exists() {
-        std::fs::write(&resolv, "nameserver 8.8.8.8\nnameserver 8.8.4.4\n")?;
-    }
+    // Always overwrite to ensure gvproxy DNS is used
+    std::fs::write(&resolv, "nameserver 192.168.127.1\nnameserver 8.8.8.8\n")?;
 
     // For systemd-based systems, configure networkd
-    if rootfs.join("lib/systemd/systemd").exists() {
-        let network_dir = rootfs.join("etc/systemd/network");
-        std::fs::create_dir_all(&network_dir)?;
+    let systemd_dir = rootfs.join("etc/systemd/system");
+    std::fs::create_dir_all(&systemd_dir)?;
 
-        // DHCP configuration for all ethernet interfaces
-        let network_conf = r#"[Match]
-Name=e*
+    let network_dir = rootfs.join("etc/systemd/network");
+    std::fs::create_dir_all(&network_dir)?;
+
+    // DHCP configuration for all ethernet interfaces
+    // Match both enp* (virtio) and eth* (legacy) naming
+    let network_conf = r#"[Match]
+Name=en* eth*
 
 [Network]
 DHCP=yes
 "#;
-        std::fs::write(network_dir.join("80-dhcp.network"), network_conf)?;
+    std::fs::write(network_dir.join("80-dhcp.network"), network_conf)?;
+
+    // Enable systemd-networkd service
+    let wants_dir = systemd_dir.join("multi-user.target.wants");
+    std::fs::create_dir_all(&wants_dir)?;
+
+    let networkd_link = wants_dir.join("systemd-networkd.service");
+    if !networkd_link.exists() {
+        let _ = std::os::unix::fs::symlink(
+            "/lib/systemd/system/systemd-networkd.service",
+            &networkd_link,
+        );
+    }
+
+    // Enable systemd-resolved for DNS (optional, but helps)
+    let resolved_link = wants_dir.join("systemd-resolved.service");
+    if !resolved_link.exists() {
+        let _ = std::os::unix::fs::symlink(
+            "/lib/systemd/system/systemd-resolved.service",
+            &resolved_link,
+        );
     }
 
     Ok(())
