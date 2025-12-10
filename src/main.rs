@@ -18,7 +18,7 @@ use uuid::Uuid;
 use cli::{default_cpus, default_memory_mib, Cli, Commands};
 use docker::{extract_image, pull_image, resolve_shortname};
 use storage::{VmState, VmStatus, VmStore, VmmPaths};
-use vm::{create_disk_image, ensure_kernel, prepare_vm_rootfs, run_vm, HostUserInfo};
+use vm::{create_disk_image, ensure_gvproxy, ensure_kernel, prepare_vm_rootfs, run_vm, HostUserInfo};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
             cmd_run(&paths, &image, cpus, memory, name, quiet).await
         }
         Commands::Ls => cmd_list(&paths).await,
+        Commands::Ps => cmd_ps(&paths).await,
         Commands::Stop { vm } => cmd_stop(&paths, &vm).await,
         Commands::Rm { vm, force } => cmd_rm(&paths, &vm, force).await,
         Commands::Start { vm } => cmd_start(&paths, &vm).await,
@@ -153,6 +154,9 @@ async fn cmd_run(
 
             // Get host user info for home directory sharing
             let host_user = HostUserInfo::current()?;
+
+            // Ensure gvproxy is available (downloads if needed)
+            ensure_gvproxy(&paths.bin_dir()).await?;
 
             // Run the VM
             let vsock_path = paths.vm_vsock(&vm_id);
@@ -271,6 +275,9 @@ async fn cmd_run(
     // Get host user info for home directory sharing
     let host_user = HostUserInfo::current()?;
 
+    // Ensure gvproxy is available (downloads if needed)
+    ensure_gvproxy(&paths.bin_dir()).await?;
+
     // Run the VM (this doesn't return on success)
     let vsock_path = paths.vm_vsock(&vm_id);
     let gvproxy_path = paths.vm_gvproxy(&vm_id);
@@ -337,6 +344,48 @@ async fn cmd_list(paths: &VmmPaths) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_ps(paths: &VmmPaths) -> Result<()> {
+    let mut store = VmStore::load(paths)?;
+    store.refresh_status();
+    store.save(paths)?;
+
+    let vms: Vec<_> = store.list().into_iter().filter(|vm| vm.status == VmStatus::Running).collect();
+
+    if vms.is_empty() {
+        println!("No running VMs. Use 'vmm run <image>' to start one.");
+        return Ok(());
+    }
+
+    // Print header (Docker ps style)
+    println!(
+        "{:<12} {:<28} {:<12} {:<12}",
+        "NAME", "IMAGE", "MEMORY", "STATUS"
+    );
+
+    for vm in vms {
+        // Format memory nicely (e.g., 2Gi, 16Gi, 512Mi)
+        let memory_str = if vm.ram_mib >= 1024 && vm.ram_mib % 1024 == 0 {
+            format!("{}Gi", vm.ram_mib / 1024)
+        } else {
+            format!("{}Mi", vm.ram_mib)
+        };
+        let status_str = if let Some(started_at) = vm.started_at {
+            format!("Up {}", format_relative_time(started_at).replace(" ago", ""))
+        } else {
+            "Running".to_string()
+        };
+        println!(
+            "{:<12} {:<28} {:<12} {:<12}",
+            truncate(&vm.name, 12),
+            truncate(&vm.image, 28),
+            memory_str,
+            status_str
+        );
+    }
+
+    Ok(())
+}
+
 /// Format a DateTime as relative time (e.g., "5 minutes ago", "2 hours ago")
 fn format_relative_time(dt: chrono::DateTime<Utc>) -> String {
     let now = Utc::now();
@@ -390,6 +439,7 @@ fn format_relative_time(dt: chrono::DateTime<Utc>) -> String {
 
 async fn cmd_stop(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     let mut store = VmStore::load(paths)?;
+    store.refresh_status();
 
     let vm = store
         .get_mut(vm_id)
@@ -416,6 +466,7 @@ async fn cmd_stop(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 
 async fn cmd_rm(paths: &VmmPaths, vm_id: &str, force: bool) -> Result<()> {
     let mut store = VmStore::load(paths)?;
+    store.refresh_status();
 
     let vm = store
         .get(vm_id)
@@ -546,6 +597,9 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 
     // Get host user info for home directory sharing
     let host_user = HostUserInfo::current()?;
+
+    // Ensure gvproxy is available (downloads if needed)
+    ensure_gvproxy(&paths.bin_dir()).await?;
 
     let vsock_path = paths.vm_vsock(&vm_id);
     let gvproxy_path = paths.vm_gvproxy(&vm_id);

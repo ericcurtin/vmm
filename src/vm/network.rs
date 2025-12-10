@@ -14,6 +14,68 @@ use tracing::{debug, info};
 const GVPROXY_DOWNLOAD_URL: &str =
     "https://github.com/containers/gvisor-tap-vsock/releases/download/v0.8.7/gvproxy-darwin";
 
+/// Ensure gvproxy is available in the bin directory.
+/// This should be called from an async context before starting the VM.
+pub async fn ensure_gvproxy(bin_dir: &Path) -> Result<PathBuf> {
+    let gvproxy_path = bin_dir.join("gvproxy");
+    if gvproxy_path.exists() {
+        debug!("Found gvproxy in vmm bin directory");
+        return Ok(gvproxy_path);
+    }
+
+    // Not found - download it
+    info!("gvproxy not found, downloading...");
+    download_gvproxy_async(&gvproxy_path).await?;
+    Ok(gvproxy_path)
+}
+
+/// Download gvproxy from GitHub releases (async version)
+async fn download_gvproxy_async(dest: &Path) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    // Ensure parent directory exists
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).context("Failed to create bin directory")?;
+    }
+
+    // Download using reqwest async
+    let response = reqwest::get(GVPROXY_DOWNLOAD_URL)
+        .await
+        .context("Failed to download gvproxy")?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Failed to download gvproxy: HTTP {}",
+            response.status()
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .context("Failed to read gvproxy download")?;
+
+    // Write to file
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .context("Failed to create gvproxy file")?;
+    file.write_all(&bytes)
+        .await
+        .context("Failed to write gvproxy file")?;
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dest)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(dest, perms)?;
+    }
+
+    info!("Downloaded gvproxy to {:?}", dest);
+    Ok(())
+}
+
 /// Manages the gvproxy process for VM networking
 pub struct GvProxy {
     process: Child,
@@ -26,14 +88,14 @@ impl GvProxy {
     /// The socket_path is where gvproxy will create a Unix socket
     /// that libkrun connects to for network traffic.
     ///
-    /// If gvproxy is not found on the system, it will be downloaded
-    /// to the vmm bin directory.
+    /// Note: ensure_gvproxy() should be called first from async context
+    /// to download gvproxy if needed.
     pub fn start(socket_path: &Path, bin_dir: &Path) -> Result<Self> {
         // Remove existing socket if present
         let _ = std::fs::remove_file(socket_path);
 
-        // Find or download gvproxy binary
-        let gvproxy_path = find_or_download_gvproxy(bin_dir)?;
+        // Find gvproxy binary (ensure_gvproxy should have been called first)
+        let gvproxy_path = find_gvproxy(bin_dir)?;
 
         debug!("Starting gvproxy at {:?}", gvproxy_path);
         debug!("Socket path: {:?}", socket_path);
@@ -85,72 +147,21 @@ impl Drop for GvProxy {
     }
 }
 
-/// Find gvproxy on the system, or download it if not found
-fn find_or_download_gvproxy(bin_dir: &Path) -> Result<PathBuf> {
-    // First check our own bin directory
+/// Find gvproxy in our bin directory
+/// Note: ensure_gvproxy() should be called first from async context to download if needed
+fn find_gvproxy(bin_dir: &Path) -> Result<PathBuf> {
+    // Only use our own bin directory - don't use system gvproxy
+    // (e.g., /opt/podman/bin/gvproxy may not be compatible)
     let vmm_gvproxy = bin_dir.join("gvproxy");
     if vmm_gvproxy.exists() {
         debug!("Found gvproxy in vmm bin directory");
         return Ok(vmm_gvproxy);
     }
 
-    // Check system locations
-    if let Some(system_gvproxy) = find_system_gvproxy() {
-        debug!("Found system gvproxy at {:?}", system_gvproxy);
-        return Ok(system_gvproxy);
-    }
-
-    // Not found - download it
-    info!("gvproxy not found, downloading...");
-    download_gvproxy(&vmm_gvproxy)?;
-    Ok(vmm_gvproxy)
-}
-
-/// Find gvproxy in PATH
-fn find_system_gvproxy() -> Option<PathBuf> {
-    which::which("gvproxy").ok()
-}
-
-/// Download gvproxy from GitHub releases
-fn download_gvproxy(dest: &Path) -> Result<()> {
-    use std::io::Write;
-
-    // Ensure parent directory exists
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).context("Failed to create bin directory")?;
-    }
-
-    // Download using reqwest (blocking)
-    let response =
-        reqwest::blocking::get(GVPROXY_DOWNLOAD_URL).context("Failed to download gvproxy")?;
-
-    if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Failed to download gvproxy: HTTP {}",
-            response.status()
-        ));
-    }
-
-    let bytes = response
-        .bytes()
-        .context("Failed to read gvproxy download")?;
-
-    // Write to file
-    let mut file = std::fs::File::create(dest).context("Failed to create gvproxy file")?;
-    file.write_all(&bytes)
-        .context("Failed to write gvproxy file")?;
-
-    // Make executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(dest)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(dest, perms)?;
-    }
-
-    info!("Downloaded gvproxy to {:?}", dest);
-    Ok(())
+    Err(anyhow::anyhow!(
+        "gvproxy not found in {:?}. Call ensure_gvproxy() first.",
+        bin_dir
+    ))
 }
 
 #[cfg(test)]
@@ -159,30 +170,19 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_find_system_gvproxy() {
-        // This test checks if we can find gvproxy on the system
-        // It may or may not find it depending on the system configuration
-        let result = find_system_gvproxy();
-        if let Some(path) = result {
-            assert!(path.exists(), "Found gvproxy path should exist");
-            assert!(path.is_file(), "Found gvproxy should be a file");
-        }
-        // Test passes regardless - we're just checking the function doesn't panic
+    /// Check if gvproxy exists in a bin directory
+    fn has_gvproxy(bin_dir: &Path) -> bool {
+        bin_dir.join("gvproxy").exists()
     }
 
     #[test]
     fn test_gvproxy_start_and_socket_creation() {
-        // Skip if gvproxy is not available on the system
+        // Skip if gvproxy is not available
         let bin_dir = TempDir::new().unwrap();
 
-        // Check if gvproxy exists anywhere
-        let gvproxy_available =
-            find_system_gvproxy().is_some() || bin_dir.path().join("gvproxy").exists();
-
-        if !gvproxy_available {
+        if !has_gvproxy(bin_dir.path()) {
             // Try to find it, but don't fail if not found (CI might not have it)
-            eprintln!("Skipping gvproxy test - gvproxy not available on system");
+            eprintln!("Skipping gvproxy test - gvproxy not available");
             return;
         }
 
@@ -221,15 +221,16 @@ mod tests {
 
     #[test]
     fn test_gvproxy_cleanup_on_drop() {
+        let bin_dir = TempDir::new().unwrap();
+
         // Skip if gvproxy is not available
-        if find_system_gvproxy().is_none() {
+        if !has_gvproxy(bin_dir.path()) {
             eprintln!("Skipping cleanup test - gvproxy not available");
             return;
         }
 
         let temp_dir = TempDir::new().unwrap();
         let socket_path = temp_dir.path().join("cleanup-test.sock");
-        let bin_dir = TempDir::new().unwrap();
 
         {
             let gvproxy = GvProxy::start(&socket_path, bin_dir.path());
