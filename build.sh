@@ -38,6 +38,7 @@ fi
 
 # Build libkrun with cargo - build the whole workspace with efi feature
 # This ensures all dependent crates get the feature flags
+# Note: krun_input and krun_display require libclang (install via: brew install llvm)
 cargo build $CARGO_PROFILE_FLAG --features efi
 
 # Copy the built library to our target directory
