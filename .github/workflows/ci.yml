@@ -43,7 +43,7 @@ jobs:
         continue-on-error: true  # Don't fail on clippy warnings for now
 
       - name: Build
-        run: cargo build --verbose
+        run: ./build.sh
 
       - name: Run tests
         run: cargo test --verbose
@@ -81,7 +81,7 @@ jobs:
           chmod +x ~/.vmm/bin/gvproxy
 
       - name: Build
-        run: cargo build --verbose
+        run: ./build.sh
 
       - name: Run network tests
         run: |
