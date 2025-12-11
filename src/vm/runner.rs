@@ -117,6 +117,12 @@ fn run_vm_quiet(config: VmConfig) -> Result<()> {
             for line in reader.lines() {
                 let Ok(line) = line else { continue };
 
+                // Always show error messages from our own code
+                if line.starts_with("Error:") || line.starts_with("VM error:") {
+                    eprintln!("{}", line);
+                    continue;
+                }
+
                 // Filter and transform libkrun log lines
                 // Format: [timestamp ERROR init_or_kernel] message
                 if line.contains("ERROR init_or_kernel]") {
