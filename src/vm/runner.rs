@@ -14,7 +14,7 @@ use super::kernel::KernelInfo;
 use super::krun_ffi::{
     KrunContext, KRUN_DISK_FORMAT_RAW, KRUN_LOG_LEVEL_DEBUG, KRUN_LOG_LEVEL_OFF,
 };
-use super::network::GvProxy;
+use super::network::{cleanup_orphaned_gvproxy, GvProxy};
 
 /// Vsock port for shell access
 pub const VSOCK_SHELL_PORT: u32 = 5000;
@@ -143,6 +143,12 @@ fn run_vm_quiet(config: VmConfig) -> Result<()> {
             // Wait for child and get exit status
             let mut status: i32 = 0;
             unsafe { libc::waitpid(child_pid, &mut status, 0) };
+
+            // Clean up gvproxy process (child may have exited without running Drop)
+            if let Some(ref gvproxy_socket) = config.gvproxy_socket {
+                let pid_file = Path::new(gvproxy_socket).with_extension("pid");
+                cleanup_orphaned_gvproxy(&pid_file);
+            }
 
             if libc::WIFEXITED(status) {
                 let exit_code = libc::WEXITSTATUS(status);

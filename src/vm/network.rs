@@ -152,7 +152,7 @@ impl GvProxy {
 }
 
 /// Clean up an orphaned gvproxy process from a previous run
-fn cleanup_orphaned_gvproxy(pid_file: &Path) {
+pub fn cleanup_orphaned_gvproxy(pid_file: &Path) {
     if let Ok(pid_str) = std::fs::read_to_string(pid_file) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             // Check if process is still running
