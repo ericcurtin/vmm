@@ -19,7 +19,8 @@ use cli::{default_cpus, default_memory_mib, Cli, Commands};
 use docker::{extract_image, pull_image, resolve_shortname};
 use storage::{VmState, VmStatus, VmStore, VmmPaths};
 use vm::{
-    create_disk_image, ensure_gvproxy, ensure_kernel, prepare_vm_rootfs, run_vm, HostUserInfo,
+    cleanup_orphaned_gvproxy, create_disk_image, ensure_gvproxy, ensure_kernel, prepare_vm_rootfs,
+    run_vm, HostUserInfo,
 };
 
 #[tokio::main]
@@ -305,6 +306,10 @@ async fn cmd_run(
     }
     store.save(paths)?;
 
+    // Clean up gvproxy process (may not have been cleaned up if VM exited abruptly)
+    let gvproxy_pid_file = gvproxy_path.with_extension("pid");
+    cleanup_orphaned_gvproxy(&gvproxy_pid_file);
+
     Ok(())
 }
 
@@ -459,6 +464,8 @@ async fn cmd_stop(paths: &VmmPaths, vm_id: &str) -> Result<()> {
         return Ok(());
     }
 
+    let full_id = vm.id.clone();
+
     if let Some(pid) = vm.pid {
         println!("Stopping VM '{}' (PID: {})...", vm.name, pid);
         unsafe {
@@ -470,6 +477,11 @@ async fn cmd_stop(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     }
 
     store.save(paths)?;
+
+    // Clean up the gvproxy process
+    let gvproxy_pid_file = paths.vm_gvproxy(&full_id).with_extension("pid");
+    cleanup_orphaned_gvproxy(&gvproxy_pid_file);
+
     Ok(())
 }
 
@@ -499,6 +511,10 @@ async fn cmd_rm(paths: &VmmPaths, vm_id: &str, force: bool) -> Result<()> {
             }
         }
     }
+
+    // Clean up the gvproxy process
+    let gvproxy_pid_file = paths.vm_gvproxy(&full_id).with_extension("pid");
+    cleanup_orphaned_gvproxy(&gvproxy_pid_file);
 
     // Remove from store
     store.remove(vm_id);

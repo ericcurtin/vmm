@@ -12,6 +12,6 @@ pub mod setup;
 
 pub use disk::create_disk_image;
 pub use kernel::ensure_kernel;
-pub use network::ensure_gvproxy;
+pub use network::{cleanup_orphaned_gvproxy, ensure_gvproxy};
 pub use runner::run_vm;
 pub use setup::{prepare_vm_rootfs, HostUserInfo};
