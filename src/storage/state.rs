@@ -134,13 +134,7 @@ impl VmStore {
         }
 
         // Try name prefix match
-        for vm in self.vms.values() {
-            if vm.name.starts_with(id_or_name) {
-                return Some(vm);
-            }
-        }
-
-        None
+        self.vms.values().find(|vm| vm.name.starts_with(id_or_name))
     }
 
     /// Get a mutable VM by ID or name (supports prefix matching)
@@ -151,18 +145,11 @@ impl VmStore {
         }
 
         // Find by short ID, exact name, or name prefix
-        let id = self.vms.iter().find_map(|(id, vm)| {
-            if id.starts_with(id_or_name)
+        self.vms.values_mut().find(|vm| {
+            vm.id.starts_with(id_or_name)
                 || vm.name == id_or_name
                 || vm.name.starts_with(id_or_name)
-            {
-                Some(id.clone())
-            } else {
-                None
-            }
-        });
-
-        id.and_then(|id| self.vms.get_mut(&id))
+        })
     }
 
     /// Remove a VM from the store (supports prefix matching)

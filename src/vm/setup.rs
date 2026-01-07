@@ -645,8 +645,7 @@ fn setup_vsock_shell_service(rootfs: &Path, user: &HostUserInfo) -> Result<()> {
 
     // The script listens on vsock port 5000 and spawns a shell for each connection
     // Using VSOCK-LISTEN since we use listen=true on the host side (libkrun creates listening socket)
-    let script_content = format!(
-        r#"#!/bin/bash
+    let script_content = r#"#!/bin/bash
 # vsock-shell: Listen on vsock and spawn a shell for each connection
 # This runs in a loop, accepting new connections
 
@@ -665,8 +664,7 @@ while true; do
     # Brief wait before restarting if socat exits
     sleep 1
 done
-"#
-    );
+"#.to_string();
 
     let script_path = sbin_dir.join("vsock-shell");
     std::fs::write(&script_path, script_content)?;
