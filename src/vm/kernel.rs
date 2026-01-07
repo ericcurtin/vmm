@@ -51,6 +51,7 @@ impl PageSize {
 pub struct KernelInfo {
     pub kernel_path: PathBuf,
     pub initrd_path: PathBuf,
+    #[allow(dead_code)] // cmdline is installed on disk via GRUB2 config
     pub cmdline: String,
 }
 
@@ -88,7 +89,7 @@ fn get_kernel_source(distro: &str, _arch: &str) -> Option<KernelSource> {
 /// * `paths` - VMM paths configuration
 /// * `distro` - The detected distro name (e.g., "ubuntu", "fedora")
 /// * `image` - Optional full image name with tag (e.g., "ubuntu:24.04", "fedora:43")
-///             If not provided, uses "latest" tag
+///   If not provided, uses "latest" tag
 /// * `verbose` - Whether to show verbose output (docker build progress, etc.)
 pub async fn ensure_kernel(
     paths: &VmmPaths,

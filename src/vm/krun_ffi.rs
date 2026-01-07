@@ -19,16 +19,22 @@ pub const KRUN_LOG_LEVEL_DEBUG: u32 = 4;
 #[allow(dead_code)]
 pub const KRUN_LOG_LEVEL_TRACE: u32 = 5;
 
-// Kernel formats
+// Kernel formats (used for direct kernel boot, now using GRUB2 EFI boot instead)
+#[allow(dead_code)]
 pub const KRUN_KERNEL_FORMAT_RAW: u32 = 0;
+#[allow(dead_code)]
 pub const KRUN_KERNEL_FORMAT_ELF: u32 = 1;
 #[allow(dead_code)]
 pub const KRUN_KERNEL_FORMAT_PE_GZ: u32 = 2;
+#[allow(dead_code)]
 pub const KRUN_KERNEL_FORMAT_IMAGE_BZ2: u32 = 3;
+#[allow(dead_code)]
 pub const KRUN_KERNEL_FORMAT_IMAGE_GZ: u32 = 4;
+#[allow(dead_code)]
 pub const KRUN_KERNEL_FORMAT_IMAGE_ZSTD: u32 = 5;
 
 // Disk formats
+#[allow(dead_code)]
 pub const KRUN_DISK_FORMAT_RAW: u32 = 0;
 #[allow(dead_code)]
 pub const KRUN_DISK_FORMAT_QCOW2: u32 = 1;
@@ -51,6 +57,10 @@ extern "C" {
 
     /// Sets the path to be used as root for the microVM.
     pub fn krun_set_root(ctx_id: u32, root_path: *const c_char) -> i32;
+
+    /// Sets a disk image to be used as the root disk for EFI boot.
+    /// This is the primary API for booting from a disk image with EFI firmware.
+    pub fn krun_set_root_disk(ctx_id: u32, disk_path: *const c_char) -> i32;
 
     /// Adds a disk image to be used as a general partition.
     pub fn krun_add_disk(
@@ -221,6 +231,20 @@ impl KrunContext {
         let c_path = CString::new(root_path).map_err(|_| -libc::EINVAL)?;
         unsafe {
             let ret = krun_set_root(self.ctx_id, c_path.as_ptr());
+            if ret < 0 {
+                Err(ret)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Set root disk for EFI boot
+    /// This is the primary API for booting from a disk image with EFI firmware.
+    pub fn set_root_disk(&self, disk_path: &str) -> Result<(), i32> {
+        let c_path = CString::new(disk_path).map_err(|_| -libc::EINVAL)?;
+        unsafe {
+            let ret = krun_set_root_disk(self.ctx_id, c_path.as_ptr());
             if ret < 0 {
                 Err(ret)
             } else {

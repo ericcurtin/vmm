@@ -2,7 +2,7 @@
 //!
 //! This module handles starting VMs using the libkrun-efi library.
 //! libkrun-efi uses EFI firmware for boot, so we boot from disk images
-//! that have a kernel and bootloader installed.
+//! that have GRUB2 bootloader installed in the EFI System Partition.
 
 use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader};
@@ -10,10 +10,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use tracing::{debug, info};
 
-use super::kernel::KernelInfo;
-use super::krun_ffi::{
-    KrunContext, KRUN_DISK_FORMAT_RAW, KRUN_LOG_LEVEL_DEBUG, KRUN_LOG_LEVEL_OFF,
-};
+use super::krun_ffi::{KrunContext, KRUN_LOG_LEVEL_DEBUG, KRUN_LOG_LEVEL_OFF};
 use super::network::{cleanup_orphaned_gvproxy, GvProxy};
 
 /// Vsock port for shell access
@@ -24,7 +21,6 @@ pub struct VmConfig {
     pub vcpus: u8,
     pub ram_mib: u32,
     pub disk_path: String,
-    pub kernel: KernelInfo,
     /// Quiet mode - suppress logging for cleaner output
     pub quiet: bool,
     /// Host home directory to share with the VM
@@ -43,11 +39,6 @@ impl Default for VmConfig {
             vcpus: 2,
             ram_mib: 2048,
             disk_path: String::new(),
-            kernel: KernelInfo {
-                kernel_path: std::path::PathBuf::new(),
-                initrd_path: std::path::PathBuf::new(),
-                cmdline: String::new(),
-            },
             quiet: false,
             host_home: None,
             vsock_path: None,
@@ -91,7 +82,7 @@ fn run_vm_quiet(config: VmConfig) -> Result<()> {
             }
 
             // Run VM in a closure to ensure all destructors run before exit
-            let exit_code = (|| -> i32 {
+            let exit_code = {
                 match run_vm_inner(config) {
                     Ok(()) => 0,
                     Err(e) => {
@@ -99,7 +90,7 @@ fn run_vm_quiet(config: VmConfig) -> Result<()> {
                         1
                     }
                 }
-            })();
+            };
 
             // All destructors have run, now exit
             std::process::exit(exit_code);
@@ -168,7 +159,6 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
         config.vcpus, config.ram_mib
     );
     debug!("Disk: {}", config.disk_path);
-    debug!("Kernel: {:?}", config.kernel.kernel_path);
 
     // Verify disk exists
     if !Path::new(&config.disk_path).exists() {
@@ -198,14 +188,10 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
     ctx.set_vm_config(config.vcpus, config.ram_mib)
         .map_err(|e| anyhow::anyhow!("Failed to set VM config: {}", e))?;
 
-    // Add the disk as the boot device (vda)
-    // libkrun-efi will use EFI firmware to boot from this disk
-    ctx.add_disk2("vda", &config.disk_path, KRUN_DISK_FORMAT_RAW, false)
-        .map_err(|e| anyhow::anyhow!("Failed to add disk: {}", e))?;
-
-    // Configure root disk remount - tells the kernel to use /dev/vda as root
-    ctx.set_root_disk_remount("/dev/vda", Some("ext4"), Some("rw"))
-        .map_err(|e| anyhow::anyhow!("Failed to set root disk remount: {}", e))?;
+    // Set the root disk for EFI boot
+    // libkrun-efi will use EFI firmware to boot from GRUB2 in the EFI System Partition
+    ctx.set_root_disk(&config.disk_path)
+        .map_err(|e| anyhow::anyhow!("Failed to set root disk: {}", e))?;
 
     // Add virtiofs share for home directory if configured
     if let Some(ref home_path) = config.host_home {
@@ -260,97 +246,13 @@ fn run_vm_inner(config: VmConfig) -> Result<()> {
         None
     };
 
-    // Set kernel and initrd for direct boot
-    // libkrun-efi can do direct kernel boot as well as EFI boot
-    let kernel_path = config
-        .kernel
-        .kernel_path
-        .to_str()
-        .context("Invalid kernel path")?;
-
-    // For libkrun-efi on macOS, we use direct kernel boot with set_kernel.
-    // The kernel, initrd and boot config are also installed on the disk as a fallback.
-
-    // Get initrd path if available
-    let initrd_str = config
-        .kernel
-        .initrd_path
-        .to_str()
-        .context("Invalid initrd path")?;
-
-    // Use initrd if it exists (needed for modular kernel drivers)
-    let initrd_path: Option<&str> = if config.kernel.initrd_path.exists() {
-        debug!("Using initrd: {:?}", config.kernel.initrd_path);
-        Some(initrd_str)
-    } else {
-        debug!("No initrd - booting directly to root filesystem");
-        None
-    };
-
-    // Detect kernel format from file
-    let kernel_format = detect_kernel_format(&config.kernel.kernel_path)?;
-    debug!("Detected kernel format: {}", kernel_format);
-
-    // Set kernel for direct boot
-    ctx.set_kernel(
-        kernel_path,
-        kernel_format,
-        initrd_path,
-        &config.kernel.cmdline,
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to set kernel: {}", e))?;
-
-    info!("Entering VM...");
+    // Boot via GRUB2 from the disk's EFI System Partition
+    // No direct kernel boot - libkrun-efi will use EFI firmware to boot GRUB2
+    info!("Entering VM (booting via GRUB2)...");
 
     // Start the VM - this doesn't return on success
     ctx.start_enter()
         .map_err(|e| anyhow::anyhow!("VM exited with error: {}", e))
-}
-
-/// Detect kernel format from file magic
-fn detect_kernel_format(kernel_path: &Path) -> Result<u32> {
-    use super::krun_ffi::*;
-    use std::fs::File;
-    use std::io::Read;
-
-    let mut file = File::open(kernel_path).context("Failed to open kernel file")?;
-
-    let mut magic = [0u8; 32];
-    file.read_exact(&mut magic)
-        .context("Failed to read kernel magic")?;
-
-    // Check for various kernel formats
-    // PE format (ARM64 EFI stub): MZ magic
-    if &magic[0..2] == b"MZ" {
-        // ARM64 Linux kernels use PE format with EFI stub
-        // The EFI stub handles decompression internally, so we pass it as RAW
-        // and let libkrun load it as a PE executable
-        debug!("PE/EFI kernel - using RAW format (EFI stub handles decompression)");
-        return Ok(KRUN_KERNEL_FORMAT_RAW);
-    }
-
-    // ELF format
-    if &magic[0..4] == b"\x7fELF" {
-        return Ok(KRUN_KERNEL_FORMAT_ELF);
-    }
-
-    // Gzip compressed (raw, not PE-wrapped)
-    if &magic[0..2] == &[0x1f, 0x8b] {
-        return Ok(KRUN_KERNEL_FORMAT_IMAGE_GZ);
-    }
-
-    // Bzip2 compressed
-    if &magic[0..2] == b"BZ" {
-        return Ok(KRUN_KERNEL_FORMAT_IMAGE_BZ2);
-    }
-
-    // Zstd compressed (raw, not PE-wrapped)
-    if &magic[0..4] == &[0x28, 0xb5, 0x2f, 0xfd] {
-        return Ok(KRUN_KERNEL_FORMAT_IMAGE_ZSTD);
-    }
-
-    // Default to RAW
-    Ok(KRUN_KERNEL_FORMAT_RAW)
 }
 
 /// RAII guard for terminal settings
@@ -379,7 +281,7 @@ fn setup_terminal() -> Result<TerminalGuard> {
         Termios::from_fd(libc::STDIN_FILENO).context("Failed to get terminal settings")?;
 
     // Set raw mode for input, but keep output processing for proper line endings
-    let mut raw = original.clone();
+    let mut raw = original;
     // Disable canonical mode, echo, signals, and extended input processing
     raw.c_lflag &= !(ICANON | ECHO | ISIG | IEXTEN);
     // Disable input processing except keep some basics

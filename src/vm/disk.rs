@@ -7,6 +7,9 @@ use std::path::Path;
 use tokio::process::Command;
 use tracing::{debug, info};
 
+#[cfg(target_os = "linux")]
+use std::io::Write;
+
 /// Size of the disk image in bytes (4GB default)
 const DEFAULT_DISK_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
@@ -84,18 +87,40 @@ async fn create_disk_via_docker(rootfs: &Path, disk_path: &Path) -> Result<()> {
         );
     }
 
-    // Script to format disk and copy rootfs
+    // Script to create GPT disk with EFI System Partition and root partition
+    // This enables GRUB2 EFI boot instead of direct kernel boot
     let script = r#"
 set -e
+
+# Install required tools (kpartx for reliable partition mapping in Docker)
+dnf install -y -q parted dosfstools e2fsprogs kpartx > /dev/null
+
 # Find an available loop device
-LOOP=$(losetup -f)
-losetup "$LOOP" /disk.raw
+LOOP=$(losetup -f --show /disk.raw)
 
-# Format with ext4
-mkfs.ext4 -F -L rootfs "$LOOP"
+# Create GPT partition table with:
+# - Partition 1: EFI System Partition (ESP), 128MB, FAT32
+# - Partition 2: Root partition, rest of disk, ext4
+parted -s "$LOOP" mklabel gpt
+parted -s "$LOOP" mkpart ESP fat32 1MiB 129MiB
+parted -s "$LOOP" set 1 esp on
+parted -s "$LOOP" mkpart root ext4 129MiB 100%
 
-# Mount and copy
-mount "$LOOP" /mnt
+# Use kpartx to create partition device mappings (more reliable in Docker)
+kpartx -av "$LOOP"
+sleep 1
+
+# Get the device mapper names (e.g., /dev/mapper/loop0p1)
+LOOP_NAME=$(basename "$LOOP")
+ESP_DEV="/dev/mapper/${LOOP_NAME}p1"
+ROOT_DEV="/dev/mapper/${LOOP_NAME}p2"
+
+# Format partitions
+mkfs.vfat -F 32 -n ESP "$ESP_DEV"
+mkfs.ext4 -F -L rootfs "$ROOT_DEV"
+
+# Mount root partition
+mount "$ROOT_DEV" /mnt
 
 # Copy rootfs using tar (preserves permissions and handles special files)
 cd /rootfs && tar cf - . | (cd /mnt && tar xf -)
@@ -122,9 +147,20 @@ if [ -f /mnt/usr/bin/sudoedit ]; then
     chmod 4111 /mnt/usr/bin/sudoedit
 fi
 
+# Mount ESP and set up GRUB2 EFI bootloader
+mkdir -p /mnt/boot/efi
+mount "$ESP_DEV" /mnt/boot/efi
+
+# Create EFI boot directory structure
+mkdir -p /mnt/boot/efi/EFI/BOOT
+
 # Sync and unmount
 sync
+umount /mnt/boot/efi
 umount /mnt
+
+# Clean up kpartx mappings and loop device
+kpartx -d "$LOOP"
 losetup -d "$LOOP"
 "#;
 
@@ -137,7 +173,7 @@ losetup -d "$LOOP"
             &format!("{}:/rootfs", rootfs_abs.display()),
             "-v",
             &format!("{}:/disk.raw", disk_abs.display()),
-            "ubuntu:24.04",
+            "fedora:43",
             "bash",
             "-c",
             script,
@@ -159,35 +195,88 @@ losetup -d "$LOOP"
 /// Create disk image using native tools (for Linux)
 #[cfg(target_os = "linux")]
 async fn create_disk_native(rootfs: &Path, disk_path: &Path) -> Result<()> {
-    info!("Formatting disk with ext4...");
+    info!("Creating GPT disk with EFI partition...");
 
-    // Format with ext4
-    let output = Command::new("mkfs.ext4")
-        .args(["-F", "-L", "rootfs"])
+    // Create GPT partition table
+    let output = Command::new("sudo")
+        .args(["parted", "-s"])
         .arg(disk_path)
+        .args(["mklabel", "gpt"])
         .output()
         .await
-        .context("Failed to run mkfs.ext4")?;
+        .context("Failed to create GPT partition table")?;
 
     if !output.status.success() {
         return Err(anyhow::anyhow!(
-            "mkfs.ext4 failed: {}",
+            "parted mklabel failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+
+    // Create EFI System Partition (128MB)
+    let _ = Command::new("sudo")
+        .args(["parted", "-s"])
+        .arg(disk_path)
+        .args(["mkpart", "ESP", "fat32", "1MiB", "129MiB"])
+        .output()
+        .await?;
+
+    let _ = Command::new("sudo")
+        .args(["parted", "-s"])
+        .arg(disk_path)
+        .args(["set", "1", "esp", "on"])
+        .output()
+        .await?;
+
+    // Create root partition
+    let _ = Command::new("sudo")
+        .args(["parted", "-s"])
+        .arg(disk_path)
+        .args(["mkpart", "root", "ext4", "129MiB", "100%"])
+        .output()
+        .await?;
+
+    // Set up loop device with partition support
+    let loop_output = Command::new("sudo")
+        .args(["losetup", "-f", "--show", "-P"])
+        .arg(disk_path)
+        .output()
+        .await
+        .context("Failed to set up loop device")?;
+
+    let loop_dev = String::from_utf8_lossy(&loop_output.stdout)
+        .trim()
+        .to_string();
+
+    // Format partitions
+    let _ = Command::new("sudo")
+        .args(["mkfs.vfat", "-F", "32", "-n", "ESP"])
+        .arg(format!("{}p1", loop_dev))
+        .output()
+        .await?;
+
+    let _ = Command::new("sudo")
+        .args(["mkfs.ext4", "-F", "-L", "rootfs"])
+        .arg(format!("{}p2", loop_dev))
+        .output()
+        .await?;
 
     // Mount and copy
     let mount_dir = tempfile::tempdir().context("Failed to create temp mount directory")?;
 
     let output = Command::new("sudo")
-        .args(["mount", "-o", "loop"])
-        .arg(disk_path)
+        .args(["mount"])
+        .arg(format!("{}p2", loop_dev))
         .arg(mount_dir.path())
         .output()
         .await
         .context("Failed to mount disk image")?;
 
     if !output.status.success() {
+        let _ = Command::new("sudo")
+            .args(["losetup", "-d", &loop_dev])
+            .output()
+            .await;
         return Err(anyhow::anyhow!(
             "Failed to mount disk: {}",
             String::from_utf8_lossy(&output.stderr)
@@ -202,10 +291,45 @@ async fn create_disk_native(rootfs: &Path, disk_path: &Path) -> Result<()> {
         .output()
         .await;
 
-    // Unmount regardless of copy result
+    // Mount ESP
+    let esp_mount = mount_dir.path().join("boot/efi");
+    let _ = Command::new("sudo")
+        .args(["mkdir", "-p"])
+        .arg(&esp_mount)
+        .output()
+        .await;
+
+    let _ = Command::new("sudo")
+        .args(["mount"])
+        .arg(format!("{}p1", loop_dev))
+        .arg(&esp_mount)
+        .output()
+        .await;
+
+    // Create EFI boot directory
+    let _ = Command::new("sudo")
+        .args(["mkdir", "-p"])
+        .arg(esp_mount.join("EFI/BOOT"))
+        .output()
+        .await;
+
+    // Unmount ESP
+    let _ = Command::new("sudo")
+        .args(["umount"])
+        .arg(&esp_mount)
+        .output()
+        .await;
+
+    // Unmount root
     let _ = Command::new("sudo")
         .args(["umount"])
         .arg(mount_dir.path())
+        .output()
+        .await;
+
+    // Detach loop device
+    let _ = Command::new("sudo")
+        .args(["losetup", "-d", &loop_dev])
         .output()
         .await;
 
@@ -255,47 +379,65 @@ async fn install_bootloader_via_docker(
     let initrd_abs =
         fs::canonicalize(initrd_path).context("Failed to get absolute path for initrd")?;
 
-    // Script to install kernel and bootloader config
+    // Script to install GRUB2 EFI bootloader with kernel and initrd
+    // Uses GPT disk with EFI System Partition created by create_disk_via_docker
+    // Uses grub-mkstandalone to create a self-contained EFI binary with embedded config
     let script = r#"
 set -e
-LOOP=$(losetup -f)
-losetup "$LOOP" /disk.raw
-mount "$LOOP" /mnt
+
+# Install required packages for GRUB (kpartx for reliable partition mapping in Docker)
+dnf install -y -q grub2-efi-aa64-modules grub2-tools dosfstools kpartx > /dev/null
+
+# Set up loop device and create partition mappings with kpartx
+LOOP=$(losetup -f --show /disk.raw)
+kpartx -av "$LOOP"
+sleep 1
+
+# Get the device mapper names
+LOOP_NAME=$(basename "$LOOP")
+ESP_DEV="/dev/mapper/${LOOP_NAME}p1"
+ROOT_DEV="/dev/mapper/${LOOP_NAME}p2"
+
+# Mount root partition (partition 2)
+mount "$ROOT_DEV" /mnt
 
 # Create boot directory and copy kernel/initrd
 mkdir -p /mnt/boot
 cp /kernel /mnt/boot/vmlinuz
 cp /initrd /mnt/boot/initrd.img
 
-# Create systemd-boot configuration
-mkdir -p /mnt/boot/loader/entries
-cat > /mnt/boot/loader/loader.conf << 'EOF'
-default vmm
-timeout 0
-EOF
+# Mount EFI System Partition
+mkdir -p /mnt/boot/efi
+mount "$ESP_DEV" /mnt/boot/efi
 
-cat > /mnt/boot/loader/entries/vmm.conf << 'EOF'
-title VMM Linux
-linux /boot/vmlinuz
+# Create the EFI boot directory structure
+mkdir -p /mnt/boot/efi/EFI/BOOT
+
+# Create an initial config that will be embedded directly into GRUB
+# This is executed immediately when GRUB starts (before searching for configfile)
+# Uses LABEL=rootfs for reliable root filesystem identification
+cat > /tmp/grub-early.cfg << 'GRUBCFG'
+set root=(hd0,gpt2)
+linux /boot/vmlinuz root=LABEL=rootfs rw console=hvc0
 initrd /boot/initrd.img
-options root=/dev/vda rw console=hvc0 quiet
-EOF
+boot
+GRUBCFG
 
-# Create extlinux configuration (alternative bootloader)
-mkdir -p /mnt/boot/extlinux
-cat > /mnt/boot/extlinux/extlinux.conf << 'EOF'
-DEFAULT vmm
-PROMPT 0
-TIMEOUT 0
-
-LABEL vmm
-    LINUX /boot/vmlinuz
-    INITRD /boot/initrd.img
-    APPEND root=/dev/vda rw console=hvc0 quiet
-EOF
+# Build GRUB EFI binary using grub2-mkimage with embedded initial config (-c flag)
+# The -c flag embeds a config that runs at startup before any configfile search
+grub2-mkimage \
+    -o /mnt/boot/efi/EFI/BOOT/BOOTAA64.EFI \
+    -O arm64-efi \
+    -c /tmp/grub-early.cfg \
+    -p "" \
+    part_gpt fat ext2 linux boot
 
 sync
+umount /mnt/boot/efi
 umount /mnt
+
+# Clean up kpartx mappings and loop device
+kpartx -d "$LOOP"
 losetup -d "$LOOP"
 "#;
 
@@ -310,7 +452,7 @@ losetup -d "$LOOP"
             &format!("{}:/kernel:ro", kernel_abs.display()),
             "-v",
             &format!("{}:/initrd:ro", initrd_abs.display()),
-            "ubuntu:24.04",
+            "fedora:43",
             "bash",
             "-c",
             script,
@@ -336,18 +478,34 @@ async fn install_bootloader_native(
     kernel_path: &Path,
     initrd_path: &Path,
 ) -> Result<()> {
+    // Set up loop device with partition support
+    let loop_output = Command::new("sudo")
+        .args(["losetup", "-f", "--show", "-P"])
+        .arg(disk_path)
+        .output()
+        .await
+        .context("Failed to set up loop device")?;
+
+    let loop_dev = String::from_utf8_lossy(&loop_output.stdout)
+        .trim()
+        .to_string();
+
     let mount_dir = tempfile::tempdir().context("Failed to create temp mount directory")?;
 
-    // Mount disk
+    // Mount root partition (partition 2)
     let output = Command::new("sudo")
-        .args(["mount", "-o", "loop"])
-        .arg(disk_path)
+        .args(["mount"])
+        .arg(format!("{}p2", loop_dev))
         .arg(mount_dir.path())
         .output()
         .await
         .context("Failed to mount disk image")?;
 
     if !output.status.success() {
+        let _ = Command::new("sudo")
+            .args(["losetup", "-d", &loop_dev])
+            .output()
+            .await;
         return Err(anyhow::anyhow!(
             "Failed to mount disk: {}",
             String::from_utf8_lossy(&output.stderr)
@@ -379,14 +537,117 @@ async fn install_bootloader_native(
             .status()
             .await?;
 
+        // Mount ESP
+        let esp_mount = mount_dir.path().join("boot/efi");
+        Command::new("sudo")
+            .args(["mkdir", "-p"])
+            .arg(&esp_mount)
+            .status()
+            .await?;
+
+        Command::new("sudo")
+            .args(["mount"])
+            .arg(format!("{}p1", loop_dev))
+            .arg(&esp_mount)
+            .status()
+            .await?;
+
+        // Create EFI boot directory
+        Command::new("sudo")
+            .args(["mkdir", "-p"])
+            .arg(esp_mount.join("EFI/BOOT"))
+            .status()
+            .await?;
+
+        // Create GRUB config directory
+        let grub_dir = boot_dir.join("grub");
+        Command::new("sudo")
+            .args(["mkdir", "-p"])
+            .arg(&grub_dir)
+            .status()
+            .await?;
+
+        // Write GRUB configuration
+        let grub_cfg = r#"set timeout=0
+set default=0
+
+menuentry "VMM Linux" {
+    linux /boot/vmlinuz root=/dev/vda2 rw console=hvc0 quiet
+    initrd /boot/initrd.img
+}
+"#;
+        let grub_cfg_path = grub_dir.join("grub.cfg");
+        Command::new("sudo")
+            .args(["sh", "-c"])
+            .arg(format!("cat > {}", grub_cfg_path.display()))
+            .stdin(std::process::Stdio::piped())
+            .spawn()?
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(grub_cfg.as_bytes())?;
+
+        // Install GRUB2 EFI bootloader
+        // Try to use grub-mkimage to create the EFI binary
+        let efi_binary = esp_mount.join("EFI/BOOT/BOOTAA64.EFI");
+        let _ = Command::new("sudo")
+            .args(["grub-mkimage", "-o"])
+            .arg(&efi_binary)
+            .args([
+                "-O",
+                "arm64-efi",
+                "-p",
+                "/boot/grub",
+                "part_gpt",
+                "part_msdos",
+                "fat",
+                "ext2",
+                "normal",
+                "boot",
+                "linux",
+                "configfile",
+                "search",
+                "search_fs_uuid",
+            ])
+            .status()
+            .await;
+
+        // Also copy grub config to EFI partition
+        let efi_grub_dir = esp_mount.join("boot/grub");
+        Command::new("sudo")
+            .args(["mkdir", "-p"])
+            .arg(&efi_grub_dir)
+            .status()
+            .await?;
+
+        Command::new("sudo")
+            .args(["cp"])
+            .arg(&grub_cfg_path)
+            .arg(efi_grub_dir.join("grub.cfg"))
+            .status()
+            .await?;
+
+        // Unmount ESP
+        Command::new("sudo")
+            .args(["umount"])
+            .arg(&esp_mount)
+            .status()
+            .await?;
+
         Ok::<(), anyhow::Error>(())
     }
     .await;
 
-    // Unmount
+    // Unmount root
     let _ = Command::new("sudo")
         .args(["umount"])
         .arg(mount_dir.path())
+        .output()
+        .await;
+
+    // Detach loop device
+    let _ = Command::new("sudo")
+        .args(["losetup", "-d", &loop_dev])
         .output()
         .await;
 

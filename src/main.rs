@@ -135,11 +135,9 @@ async fn cmd_run(
         // Reuse existing VM
         let vm_id = existing_vm.id.clone();
         let _vm_name = existing_vm.name.clone();
-        let distro = existing_vm.distro.clone();
 
-        // Get paths
+        // Get disk path - kernel is already installed on disk via GRUB2
         let disk_path = paths.vm_disk(&vm_id);
-        let kernel = ensure_kernel(paths, &distro, Some(image), !quiet).await?;
 
         // Check disk exists
         if !disk_path.exists() {
@@ -161,14 +159,13 @@ async fn cmd_run(
             // Ensure gvproxy is available (downloads if needed)
             ensure_gvproxy(&paths.bin_dir()).await?;
 
-            // Run the VM
+            // Run the VM (boots via GRUB2 from disk)
             let vsock_path = paths.vm_vsock(&vm_id);
             let gvproxy_path = paths.vm_gvproxy(&vm_id);
             let config = vm::runner::VmConfig {
                 vcpus: cpus,
                 ram_mib: memory,
                 disk_path: disk_path.to_string_lossy().to_string(),
-                kernel,
                 quiet,
                 host_home: Some(host_user.home_dir.clone()),
                 vsock_path: Some(vsock_path.to_string_lossy().to_string()),
@@ -195,7 +192,7 @@ async fn cmd_run(
     let vm_name = name.unwrap_or_else(|| {
         // Use the base image name (e.g., "ubuntu" from "docker.io/library/ubuntu:latest")
         let base = image.split(':').next().unwrap_or(image);
-        base.split('/').last().unwrap_or(base).to_string()
+        base.split('/').next_back().unwrap_or(base).to_string()
     });
 
     // Progress output - always shown to user (eprintln goes to stderr)
@@ -281,14 +278,13 @@ async fn cmd_run(
     // Ensure gvproxy is available (downloads if needed)
     ensure_gvproxy(&paths.bin_dir()).await?;
 
-    // Run the VM (this doesn't return on success)
+    // Run the VM (boots via GRUB2 from disk)
     let vsock_path = paths.vm_vsock(&vm_id);
     let gvproxy_path = paths.vm_gvproxy(&vm_id);
     let config = vm::runner::VmConfig {
         vcpus: cpus,
         ram_mib: memory,
         disk_path: disk_path.to_string_lossy().to_string(),
-        kernel,
         quiet,
         host_home: Some(host_user.home_dir.clone()),
         vsock_path: Some(vsock_path.to_string_lossy().to_string()),
@@ -592,14 +588,11 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
 
     let vm_id = vm.id.clone();
     let vm_name = vm.name.clone();
-    let vm_image = vm.image.clone();
-    let distro = vm.distro.clone();
     let vcpus = vm.vcpus;
     let ram_mib = vm.ram_mib;
 
-    // Get paths
+    // Get disk path - kernel is already installed on disk via GRUB2
     let disk_path = paths.vm_disk(&vm_id);
-    let kernel = ensure_kernel(paths, &distro, Some(&vm_image), false).await?;
 
     // Check disk exists
     if !disk_path.exists() {
@@ -626,13 +619,13 @@ async fn cmd_start(paths: &VmmPaths, vm_id: &str) -> Result<()> {
     // Ensure gvproxy is available (downloads if needed)
     ensure_gvproxy(&paths.bin_dir()).await?;
 
+    // Run VM (boots via GRUB2 from disk)
     let vsock_path = paths.vm_vsock(&vm_id);
     let gvproxy_path = paths.vm_gvproxy(&vm_id);
     let config = vm::runner::VmConfig {
         vcpus,
         ram_mib,
         disk_path: disk_path.to_string_lossy().to_string(),
-        kernel,
         quiet: false,
         host_home: Some(host_user.home_dir.clone()),
         vsock_path: Some(vsock_path.to_string_lossy().to_string()),
@@ -783,7 +776,7 @@ fn setup_terminal_raw() -> Result<TerminalRawGuard> {
         Termios::from_fd(libc::STDIN_FILENO).context("Failed to get terminal settings")?;
 
     // Set raw mode
-    let mut raw = original.clone();
+    let mut raw = original;
     raw.c_lflag &= !(ICANON | ECHO | ISIG | IEXTEN);
     raw.c_iflag &= !(IXON | BRKINT | INPCK | ISTRIP | ICRNL);
     raw.c_oflag |= OPOST | ONLCR;

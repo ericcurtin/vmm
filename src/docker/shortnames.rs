@@ -81,7 +81,12 @@ pub fn resolve_shortname(image: &str) -> String {
     let (name, tag) = if let Some(pos) = image.rfind(':') {
         // Make sure the colon is not part of a port number (e.g., registry:5000/image)
         let before_colon = &image[..pos];
-        if before_colon.contains('/') && !before_colon.split('/').last().unwrap_or("").contains('.')
+        if before_colon.contains('/')
+            && !before_colon
+                .split('/')
+                .next_back()
+                .unwrap_or("")
+                .contains('.')
         {
             // It's likely a tag separator
             (&image[..pos], Some(&image[pos + 1..]))
@@ -137,7 +142,7 @@ pub fn get_base_name(image: &str) -> String {
     // Get the last path component
     without_tag
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or(without_tag)
         .to_string()
 }
